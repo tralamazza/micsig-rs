@@ -1,0 +1,10 @@
+[package]
+name = "micsig-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Command-line tool to interface with a Micsig oscilloscope over SCPI"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rusb = "0.9"
+thiserror = "2"
