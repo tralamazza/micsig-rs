@@ -14,9 +14,8 @@ drawn from the vendor's [SCPI Programming Guide][guide], a copy of which is
 
 Above: `micsig screenshot` output, unmodified, with CH1 on the probe
 compensation output — a 1 kHz square wave, 2.098 V pk-pk. The file is only
-viewable because the tool repairs the firmware's broken JFIF marker, which is
-one of a dozen-odd behaviours documented in
-[Firmware quirks](docs/firmware-quirks.md).
+viewable because the tool repairs the firmware's broken JFIF marker, one of
+the behaviours catalogued in [Firmware quirks](docs/firmware-quirks.md).
 
 ## Build
 
@@ -156,7 +155,8 @@ micsig measure [--channel <1-4>] [--items <a,b,...> | --all] [--csv]
 ```
 
 Lets the scope do the arithmetic. With no `--items` it reports a general set;
-`--all` reports all 21 supported. Against the 1 kHz probe-compensation output:
+`--all` reports everything supported, and `micsig measure --help` lists the
+items. Against the 1 kHz probe-compensation output:
 
 ```
 $ micsig measure
@@ -214,10 +214,10 @@ is implemented by the MHO series.
 
 ## Documentation
 
-- **[Firmware quirks](docs/firmware-quirks.md)** — the dozen-plus instrument
-  behaviours that contradict or are missing from the programming guide, each
-  reproduced against hardware on two firmware versions. Read this before
-  trusting anything the manual says about `:WAVeform:DATA?`.
+- **[Firmware quirks](docs/firmware-quirks.md)** — instrument behaviours that
+  contradict or are missing from the programming guide, each reproduced
+  against hardware on two firmware versions. Read this before trusting
+  anything the manual says about `:WAVeform:DATA?`.
 - **[Transport and protocol notes](docs/protocol.md)** — how requests are
   framed over USBTMC and raw TCP, and the one known limitation (`waveform`
   over TCP) that is not worked around.
@@ -232,24 +232,22 @@ is implemented by the MHO series.
 
 ## Testing
 
-`cargo test` runs 46 tests and needs no instrument attached, which is what
-lets CI run the whole suite on Linux, macOS and Windows. The workflow also
-enforces `rustfmt` and `clippy`, and builds against the 1.88 MSRV.
+`cargo test` needs no instrument attached, which is what lets CI run the whole
+suite on Linux, macOS and Windows. The workflow also enforces `rustfmt` and
+`clippy`, and builds against the 1.88 MSRV.
 
-Unit tests cover block-header and preamble parsing, sample decoding, USBTMC
-header packing, timeout parsing, decode-record conversion, and the clap
-definition itself (`Cli::command().debug_assert()`, which catches conflicting
-flag definitions).
+Unit tests cover the pure parts — block headers, preambles, sample decoding,
+USBTMC header packing, argument parsing — including the clap definition itself
+via `Cli::command().debug_assert()`, which catches conflicting flags.
 
-`tests/regression.rs` pins the behaviours that hardware testing found the hard
-way, each against a scripted mock socket or a captured payload: EOF
-mid-response, a block with no trailing terminator, hostname resolution in
-`discover`, the sample-count length field, the JFIF marker repair across
-several corrupt values, ASCii-volts detection, and text-versus-binary stdout
-rendering. A scripted `FakeScope` covers the `:WAVeform:DATA?` paging: that
-every page is drained, that `:WAVeform:MODE` is written after the rest of the
-setup so the cursor starts at the beginning, and that a record which never
-terminates is reported rather than silently truncated.
+`tests/regression.rs` is the more interesting half. Nearly every case in it
+corresponds to something in [firmware quirks](docs/firmware-quirks.md) that
+cost real debugging time, pinned against a scripted mock socket or a fake
+instrument so it cannot come back: a length field that counts samples rather
+than bytes, a paged read that must be drained to the end, a corrupt JFIF
+marker, an empty screenshot that means "busy" rather than "blank", a
+measurement limit that silently drops the eleventh item. If you fix a bug
+against hardware, that is where the test belongs.
 
 ## License
 
