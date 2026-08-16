@@ -185,6 +185,10 @@ is implemented by the MHO series.
 - **[Transport and protocol notes](docs/protocol.md)** — how requests are
   framed over USBTMC and raw TCP, and the one known limitation (`waveform`
   over TCP) that is not worked around.
+- **[SCPI-99 compliance](docs/scpi-compliance.md)** — measured against the
+  actual standard. One of thirteen IEEE 488.2 mandated commands works, none of
+  the eleven SCPI-required ones do, and there is no error queue. Useful if you
+  are pointing generic SCPI tooling at this scope and wondering why it hangs.
 - **[Linux setup](docs/linux-setup.md)** — libusb, the udev rule, and the
   in-tree `usbtmc` kernel driver.
 - **[SCPI Programming Guide](docs/SCPI%20Programming%20Guide-%20Micsig%20Oscilloscope.pdf)**

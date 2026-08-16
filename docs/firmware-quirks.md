@@ -70,11 +70,27 @@ predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
   queries and then flips. The 1.97.70 notes tied this to `:BUS<n>:MODE TXT`,
   but on 1.143.72 it flipped without any correlated command. Do not parse the
   firmware field expecting it to be stable.
-- **Keyword abbreviation is inconsistent per command.** The firmware does not
-  implement the SCPI long/short-form rule; each command accepts its own fixed
-  spellings. `:CHANnel1:COUPling?` errors while `:CHAN1:COUP?` returns `DC`,
-  and `:ACQuire:DEPTh?` works while `:ACQ:DEPT?` errors. Neither form is
-  universally safe — try both before concluding a command is unsupported.
+- **One command rejects its own documented short form.** `:ACQuire:DEPTh?`
+  answers, `:ACQ:DEPT?` errors, which SCPI-99 §6.2.1 forbids — an instrument
+  must accept both the exact long and the exact short form. This is the
+  exception rather than the rule: of 25 commands checked, 24 took both
+  spellings. An earlier version of this list claimed abbreviation was broken
+  across the board, which was wrong; see
+  [scpi-compliance.md](scpi-compliance.md) for the measurement.
+- **Sending any mandated `*` command except `*IDN?` stalls the interface.**
+  `*CLS`, `*ESE?`, `*ESR?`, `*OPC`, `*OPC?`, `*RST`, `*SRE?`, `*STB?`, `*TST?`
+  and `*WAI` return nothing at all and leave the instrument unresponsive for a
+  second or two, where an unrecognised header like `*FOO?` errors cleanly and
+  immediately. Generic SCPI tooling that opens with `*CLS` or synchronises on
+  `*OPC?` will see a timeout rather than an error. `micsig` sends no common
+  command other than `*IDN?`. `*RST` is safe in the sense that it does nothing
+  at all: against a deliberately dirtied instrument it changed none of sixteen
+  settings, where `:MENU:RESet` changed eight of the same sixteen.
+- **`:MENU:RESet` is a partial factory reset.** It restores vertical scale and
+  position, probe ratio, timebase extent, trigger type and mode, averaging and
+  graticule, but leaves channel enables, `:BUS<n>:TYPE`, `:WAVeform:FORMat`
+  and `:TIMebase:MODE` exactly as they were. Do not assume a known state after
+  issuing it.
 - **`:WAVeform:STARt`/`:STOP` are accepted but ignored.** Both take a value and
   read it back, but `:WAVeform:DATA?` pages the whole record regardless. The
   automatic paging above is the only way to read past the transfer cap.
