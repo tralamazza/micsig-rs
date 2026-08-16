@@ -1,7 +1,13 @@
 # micsig-rs
 
 Command-line tool to interface with a Micsig oscilloscope over SCPI (USB, LAN,
-WiFi). Commands are drawn from `doc/SCPI Programming Guide- Micsig Oscilloscope.pdf`.
+WiFi). Commands are drawn from the [SCPI Programming Guide][guide], a copy of
+which is vendored at `doc/SCPI Programming Guide- Micsig Oscilloscope.pdf`
+(byte-identical to Micsig's published file, SHA-256 `f84fe826…76d8315`). The
+vendored copy is kept because the upstream URL is content-addressed under a
+dated path and is likely to move.
+
+[guide]: https://www.micsig.com/uploads/20260806/1cf4f626caf3eecee6cee1145a80762f.pdf
 
 ## Build
 
@@ -289,6 +295,10 @@ at your option.
 
 `src/usb.rs` is derived from [`rust-usbtmc`](https://github.com/rogerioadris/rust-usbtmc)
 (c) Rogério Adriano, also dual-licensed MIT OR Apache-2.0.
+
+The programming guide under `doc/` is Micsig's copyright, not covered by the
+above, and is redistributed unmodified as published by the vendor. It is
+excluded from the packaged crate.
 
 ### Contribution
 
