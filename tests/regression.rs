@@ -166,9 +166,19 @@ fn ascii_volts_payload_is_recognised() {
     assert!(!micsig_rs::waveform::looks_like_ascii_volts(b""));
 }
 
+/// Build a block of `n` ASCII-hex samples with distinct, in-range values, so
+/// pages can be told apart when concatenated.
+fn hex_block(n: usize) -> Vec<u8> {
+    let mut block = format!("#9{n:09}").into_bytes();
+    for i in 0..n {
+        block.extend_from_slice(format!("{:04X}", (i % 0x7FFF) as u16).as_bytes());
+    }
+    block.push(b'\n');
+    block
+}
+
 /// A scripted stand-in for an instrument, so `capture` can be exercised
-/// without hardware. Queries are answered from `replies`, keyed by the
-/// command; `:WAVeform:DATA?` pops one page per call.
+/// without hardware. `:WAVeform:DATA?` pops one page per call.
 struct FakeScope {
     pages: Vec<Vec<u8>>,
     page: usize,
@@ -176,21 +186,10 @@ struct FakeScope {
 }
 
 impl FakeScope {
-    /// Build a scope holding `counts` pages of ASCII-hex samples, followed by
-    /// the empty block a real MHO14-200N sends to mark the end of the record.
+    /// A scope holding `counts` pages, followed by the empty block a real
+    /// MHO14-200N sends to mark the end of the record.
     fn with_pages(counts: &[usize]) -> Self {
-        let mut pages: Vec<Vec<u8>> = counts
-            .iter()
-            .map(|&n| {
-                let mut block = format!("#9{n:09}").into_bytes();
-                // Distinct, in-range sample values so pages can be told apart.
-                for i in 0..n {
-                    block.extend_from_slice(format!("{:04X}", (i % 0x7FFF) as u16).as_bytes());
-                }
-                block.push(b'\n');
-                block
-            })
-            .collect();
+        let mut pages: Vec<Vec<u8>> = counts.iter().map(|&n| hex_block(n)).collect();
         pages.push(b"#9000000000\n".to_vec());
         FakeScope {
             pages,
@@ -300,4 +299,63 @@ fn waveform_capture_refuses_an_endless_record() {
         err.to_string().contains("truncated"),
         "unexpected error: {err}"
     );
+}
+
+/// A scope that answers `:SYS:SCR?` with `empties` empty blocks before the
+/// real image, mimicking one that is still busy with a previous capture.
+struct BusyScreen {
+    empties: usize,
+    calls: usize,
+}
+
+impl Scpi for BusyScreen {
+    fn send(&mut self, _: &str) -> Result<(), micsig_rs::error::Error> {
+        Ok(())
+    }
+    fn query(&mut self, _: &str) -> Result<String, micsig_rs::error::Error> {
+        Ok(String::new())
+    }
+    fn query_raw(&mut self, command: &str) -> Result<Vec<u8>, micsig_rs::error::Error> {
+        assert_eq!(command, ":SYS:SCR?");
+        self.calls += 1;
+        if self.calls <= self.empties {
+            return Ok(b"#9000000000\n".to_vec());
+        }
+        // Minimal JPEG with the firmware's corrupt APP0 marker.
+        let img: &[u8] = &[
+            0xFF, 0xD8, 0x58, 0x00, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+        ];
+        let mut out = format!("#9{:09}", img.len()).into_bytes();
+        out.extend_from_slice(img);
+        Ok(out)
+    }
+}
+
+/// Back-to-back `:SYS:SCR?` returns an empty block for a while, so a single
+/// failed attempt is not a real failure. Capture retries, and still repairs
+/// the marker on whichever attempt succeeds.
+#[test]
+fn screenshot_retries_while_the_instrument_is_busy() {
+    let mut scope = BusyScreen {
+        empties: 3,
+        calls: 0,
+    };
+    let img = micsig_rs::screenshot::capture_with(&mut scope, 5, Duration::ZERO)
+        .expect("should have retried past the empty blocks");
+    assert_eq!(scope.calls, 4, "should stop retrying once an image arrives");
+    assert_eq!(&img[..4], &[0xFF, 0xD8, 0xFF, 0xE0], "marker not repaired");
+}
+
+/// Retrying must still give up rather than loop, and must never hand back the
+/// zero-byte image that would look like a successful capture.
+#[test]
+fn screenshot_gives_up_after_the_attempt_limit() {
+    let mut scope = BusyScreen {
+        empties: 100,
+        calls: 0,
+    };
+    let err = micsig_rs::screenshot::capture_with(&mut scope, 3, Duration::ZERO)
+        .expect_err("an always-busy instrument must be an error");
+    assert_eq!(scope.calls, 3, "attempt limit not honoured");
+    assert!(err.to_string().contains("empty screenshot"), "got: {err}");
 }

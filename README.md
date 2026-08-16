@@ -96,9 +96,11 @@ the manual calling it PNG). Without `--file`, the image is saved to
 `usb`. Use `--file -` for stdout. The image at the top of this page is one,
 unmodified.
 
-Allow roughly a second between captures: asked again too soon, the scope
-returns an empty block, which `screenshot` reports rather than writing a
-zero-byte file.
+Asked again too soon the scope returns an empty block instead of an image, so
+`screenshot` retries up to five times at 700 ms intervals. Six back-to-back
+captures all succeed; before the retry, five of those six failed. An
+instrument that stays busy is reported as an error rather than written out as
+a zero-byte file.
 
 ### `waveform` — capture channel data
 
@@ -119,8 +121,9 @@ returns only part of the record — 62500 of 110000 in `normal` mode. Writing
 
 The manual says `--mode raw` requires a stopped scope; it returned data while
 running too. What `raw` does change is the length: with the scope stopped at
-1 ms/div (`:ACQuire:DEPTh?` = 11 M) it yielded all 11,000,000 samples in 181 s
-and a 426 MB CSV, against 110,000 for `normal`. Ask for `raw` deliberately.
+1 ms/div (`:ACQuire:DEPTh?` = 11 M) it yielded all 11,000,000 samples in 14 s
+and a 409 MB CSV, against 110,000 in 0.13 s for `normal`. Ask for `raw`
+deliberately — it is the file size rather than the wait that will surprise you.
 
 ### `benchmark` — measure request latency
 
@@ -196,7 +199,7 @@ is implemented by the MHO series.
 
 ## Testing
 
-`cargo test` runs 37 tests and needs no instrument attached, which is what
+`cargo test` runs 39 tests and needs no instrument attached, which is what
 lets CI run the whole suite on Linux, macOS and Windows. The workflow also
 enforces `rustfmt` and `clippy`, and builds against the 1.88 MSRV.
 

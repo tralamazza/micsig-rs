@@ -119,11 +119,18 @@ const MAX_PAGES: usize = 200;
 /// single read returns only the first page of the record. Successive reads
 /// continue where the previous one stopped and the instrument signals the end
 /// with an empty block, which is what the loop below drains. Writing
-/// `:WAVeform:MODE` rewinds that cursor, so [`set_mode`] must come first.
+/// `:WAVeform:MODE` is the only thing that rewinds that cursor, so it is sent
+/// last during setup.
 ///
-/// Verified on an MHO14-200N (firmware 1.143.72): in `NORMal` mode the three
-/// pages of a 110000-sample record concatenate byte-for-byte into the payload
-/// that the single-shot `:WAVeform:DATA:HEX?` returns.
+/// The undocumented `:WAVeform:DATA:HEX?` returns the whole record in one
+/// response and was tried here as a fast path. It is not worth the extra code:
+/// it only answers in `NORMal` mode, and measured over ten runs each it made
+/// no difference to a full export (0.127 s median against 0.124 s for the
+/// paged path), because the transfer is not the expensive part.
+///
+/// Verified on an MHO14-200N (firmware 1.143.72): the three pages of a
+/// 110000-sample `NORMal` record concatenate byte-for-byte into the payload
+/// that single-shot read returns, so the paging here loses nothing.
 ///
 /// Verified over USBTMC. Over raw TCP the block framing under-reads each page
 /// by 4x because the length field counts samples, not bytes — see the "Known

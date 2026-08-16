@@ -1,25 +1,47 @@
 //! Screen capture via the `:SYS:SCR?` command.
 
+use std::thread::sleep;
+use std::time::Duration;
+
 use crate::error::Result;
 use crate::transport::Scpi;
 
+/// How many times [`capture`] will re-ask for a screenshot before giving up.
+const MAX_ATTEMPTS: usize = 5;
+
+/// How long to wait between attempts. Measured on an MHO14-200N (firmware
+/// 1.143.72): after one successful `:SYS:SCR?`, the next five back-to-back
+/// requests all returned empty, and a one-second pause was enough to recover.
+const RETRY_DELAY: Duration = Duration::from_millis(700);
+
 /// Capture the current screen image bytes.
 ///
-/// Errors if the instrument returns an empty block, which it does when
-/// `:SYS:SCR?` is issued again before the previous capture has completed;
-/// writing the zero-byte result to a file would look like success.
+/// An empty block means the instrument is still busy with a previous capture
+/// rather than that the screen is blank, so this retries a few times before
+/// failing. Writing the zero-byte result to a file would look like success,
+/// which is why it is never returned.
 pub fn capture(inst: &mut impl Scpi) -> Result<Vec<u8>> {
-    let raw = inst.query_raw(":SYS:SCR?")?;
-    let mut image = crate::scpi::unwrap_block(&raw);
-    if image.is_empty() {
-        return Err(crate::error::Error::Message(
-            "instrument returned an empty screenshot; it may still be busy \
-             with a previous capture"
-                .into(),
-        ));
+    capture_with(inst, MAX_ATTEMPTS, RETRY_DELAY)
+}
+
+/// [`capture`] with the retry policy spelled out, so tests need not sleep.
+pub fn capture_with(inst: &mut impl Scpi, attempts: usize, delay: Duration) -> Result<Vec<u8>> {
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        if attempt > 0 && !delay.is_zero() {
+            sleep(delay);
+        }
+        let raw = inst.query_raw(":SYS:SCR?")?;
+        let mut image = crate::scpi::unwrap_block(&raw);
+        if !image.is_empty() {
+            repair_jfif_marker(&mut image);
+            return Ok(image);
+        }
     }
-    repair_jfif_marker(&mut image);
-    Ok(image)
+    Err(crate::error::Error::Message(format!(
+        "instrument returned an empty screenshot {attempts} times; it may \
+         still be busy with a previous capture"
+    )))
 }
 
 /// Repair the APP0 marker in a Micsig screenshot.

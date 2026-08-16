@@ -49,9 +49,9 @@ predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
 - **Back-to-back `:SYS:SCR?` returns an empty block.** Issued again before the
   previous capture finishes, the scope answers `#900000000` — on 1.143.72 the
   five captures following a successful one were all empty, so this is not
-  limited to the immediate next request. `screenshot` treats an empty block as
-  an error rather than writing a zero-byte file; allow roughly a second
-  between captures.
+  limited to the immediate next request. `screenshot` retries up to five times
+  at 700 ms intervals, which is enough to make back-to-back captures reliable,
+  and reports an empty block as an error rather than writing a zero-byte file.
 - **A disabled channel returns another channel's data.** `:WAVeform:DATA?` for
   a channel that is switched off does not error or return an empty block — it
   returns stale samples from whichever channel was last acquired. With only

@@ -400,18 +400,25 @@ fn waveform_command(conn: &ConnectionArgs, args: WaveformArgs) -> Result<()> {
     let volts = waveform::samples_to_volts(&wave);
     match args.file.as_deref() {
         Some("-") | None => {
-            let mut out = std::io::stdout().lock();
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
             write_waveform_csv(&mut out, &wave, &volts).map_err(Error::Io)?;
         }
         Some(path) => {
-            let mut f = std::fs::File::create(path).map_err(Error::Io)?;
-            write_waveform_csv(&mut f, &wave, &volts).map_err(Error::Io)?;
+            let f = std::fs::File::create(path).map_err(Error::Io)?;
+            let mut out = std::io::BufWriter::new(f);
+            write_waveform_csv(&mut out, &wave, &volts).map_err(Error::Io)?;
             outln!("Saved waveform data to {path}");
         }
     }
     Ok(())
 }
 
+/// Write the trace as CSV.
+///
+/// The caller must hand this a buffered writer. A full-depth `--mode raw`
+/// capture is 11 million rows, and one `writeln!` per row straight at a
+/// `File` or a line-buffered stdout is one write syscall per row — that alone
+/// dominated the runtime of every export.
 fn write_waveform_csv(
     out: &mut impl std::io::Write,
     wave: &waveform::Waveform,
@@ -422,7 +429,8 @@ fn write_waveform_csv(
         let t = wave.preamble.x_origin + i as f64 * wave.preamble.x_increment;
         writeln!(out, "{i},{t:.9e},{v:.9e}")?;
     }
-    Ok(())
+    // BufWriter swallows errors on drop, so surface them here instead.
+    out.flush()
 }
 
 fn benchmark_command(conn: &ConnectionArgs, args: BenchmarkArgs) -> Result<()> {
