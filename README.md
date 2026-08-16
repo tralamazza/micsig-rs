@@ -24,7 +24,10 @@ cargo install --path .     # or install it onto your PATH
 |---|---|
 | macOS (aarch64) | Verified end-to-end against an MHO14-200N over USBTMC |
 | Linux (aarch64, Ubuntu 26.04) | Builds, all tests pass; USB data path untested (no device) |
-| Windows | Untested |
+| Windows | Builds and all tests pass in CI; USB data path untested (no device) |
+
+CI runs the test suite on all three, but no runner has an instrument attached,
+so "tests pass" says nothing about the USB data path on Linux or Windows.
 
 There are no `cfg(target_os)` branches in the source; the only platform-specific
 dependency is libusb. Requires Rust 1.88 or newer.
