@@ -155,6 +155,36 @@ micsig discover -a 10.0.0.5                  # one TCP port
 micsig discover -a 10.0.0.5 --ports 5025,111 # several
 ```
 
+### `decode` — read decoded serial bus frames
+
+```
+micsig decode [--bus <1|2>] [--file <name>]
+```
+
+Reads the scope's serial bus decoder (UART, LIN, SPI, CAN, IIC, 1553B, 429)
+and emits CSV. The bus must already be configured on the instrument:
+
+```
+micsig scpi ":BUS1:TYPE UART"
+micsig scpi ":BUS1:UART:RX CH1"
+micsig scpi ":BUS1:UART:USERbaud 2000"
+micsig scpi ":BUS1:DISPlay 1"
+micsig decode
+```
+
+```
+BeginX,EndX,Data,Color
+0s,3.7ms,55,0xffadbdcc
+4.2ms,8.7ms,55,0xffadbdcc
+```
+
+`:BUS<n>:MODE` selects the trade-off: `GRAP` timestamps each frame but only
+reports what is on screen, while `TXT` drops the timestamps and reaches
+further back into the capture (5 vs 25 frames from one acquisition here).
+
+This is built on `:BUS<n>:DATA?`, which is **not in the programming guide** but
+is implemented by the MHO series.
+
 ## Notes
 
 - TCP transport is SCPI-raw (default port `5025`, the LXI SCPI-raw port). Set
@@ -203,6 +233,17 @@ Verified against an MHO14-200N running firmware 1.97.70:
 - **`:WAVeform:FORMat ASCii` returns volts, not samples** — comma-separated
   scientific notation (`1.148325e-02,...`), already scaled. It does not fit the
   sample-plus-preamble model, so only `WORD` and `BYTE` are offered.
+- **`*IDN?` reports a different firmware version depending on the UI mode.**
+  In the normal YT view this unit answers `Micsig,MHO14-200N,410000676,1.97.70`;
+  put it into the serial-decode text view with `:BUS<n>:MODE TXT` and the same
+  query answers `...,1.97.8`. Reproduced 100% across repeated switches. Do not
+  parse the firmware field expecting it to be stable.
+- **`:BUS<n>:MODE TXT` takes over the screen and stops waveform capture.** It
+  switches the instrument into a full-screen decode view ("Please open the
+  channel first!"), after which `:WAVeform:DATA?` returns an empty block in
+  every mode. `:BUS<n>:MODE GRAP` restores it. Configuring a bus also switches
+  `:TRIGger:TYPE` to the bus trigger (`S1:UART Start Bit`), which has to be set
+  back to `EDGE` by hand.
 - Transfers cap at ~250 KB per `:WAVeform:DATA?`, so deep captures need
   `:WAVeform:STARt`/`:STOP` paging (not yet implemented).
 

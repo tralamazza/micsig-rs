@@ -5,6 +5,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 
 use micsig_rs::benchmark;
+use micsig_rs::decode;
 use micsig_rs::discover;
 use micsig_rs::screenshot;
 use micsig_rs::transport::{DEFAULT_RAW_PORT, Instrument, Scpi};
@@ -109,6 +110,8 @@ enum Command {
     Benchmark(BenchmarkArgs),
     /// List instruments: USB devices, or a TCP host given --address.
     Discover(DiscoverArgs),
+    /// Read decoded serial bus frames as CSV.
+    Decode(DecodeArgs),
 }
 
 #[derive(Args)]
@@ -171,6 +174,17 @@ struct BenchmarkArgs {
     /// Number of requests to send.
     #[arg(short, long, default_value = "100")]
     count: NonZeroUsize,
+}
+
+#[derive(Args)]
+struct DecodeArgs {
+    /// Bus to read.
+    #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+    bus: u8,
+
+    /// Output CSV filename, or `-` for stdout (the default).
+    #[arg(short, long)]
+    file: Option<String>,
 }
 
 #[derive(Args)]
@@ -466,6 +480,30 @@ fn discover_command(conn: &ConnectionArgs, args: DiscoverArgs) -> Result<()> {
     Ok(())
 }
 
+fn decode_command(conn: &ConnectionArgs, args: DecodeArgs) -> Result<()> {
+    let mut inst = conn.open(10)?;
+    let raw = decode::read(&mut inst, args.bus)?;
+    let csv = decode::to_csv(&raw);
+    if decode::frame_count(&raw) == 0 {
+        return Err(Error::Message(format!(
+            "bus {} decoded no frames; check it is configured and the signal \
+             is present (see `:BUS{}:TYPE?`)",
+            args.bus, args.bus
+        )));
+    }
+    match args.file.as_deref() {
+        Some("-") | None => print_stdout(csv.as_bytes())?,
+        Some(path) => {
+            std::fs::write(path, &csv).map_err(Error::Io)?;
+            outln!(
+                "Saved {} decoded frames to {path}",
+                decode::frame_count(&raw)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
@@ -489,6 +527,7 @@ fn main() {
         Command::Waveform(args) => waveform_command(&conn, args),
         Command::Benchmark(args) => benchmark_command(&conn, args),
         Command::Discover(args) => discover_command(&conn, args),
+        Command::Decode(args) => decode_command(&conn, args),
     };
     if let Err(e) = result {
         // `micsig waveform | head` closes stdout early. Rust ignores SIGPIPE,
