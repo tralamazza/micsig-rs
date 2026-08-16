@@ -232,7 +232,8 @@ impl UsbInstrument {
                     rejected.get_or_insert(match e {
                         rusb::Error::Access => format!(
                             "permission denied ({e}). On Linux, install a udev rule for \
-                             {MICSIG_VID:04x}:{MICSIG_PID:04x} or run as root — see the README"
+                             {MICSIG_VID:04x}:{MICSIG_PID:04x} or run as root — \
+                             see docs/linux-setup.md"
                         ),
                         _ => format!("cannot open it ({e})"),
                     });
@@ -267,7 +268,7 @@ impl UsbInstrument {
                     )),
                     rusb::Error::Access => Error::UsbMsg(format!(
                         "permission denied claiming interface {iface} ({e}); \
-                         see the Linux setup notes in the README"
+                         see docs/linux-setup.md"
                     )),
                     other => Error::Usb(other),
                 })?;

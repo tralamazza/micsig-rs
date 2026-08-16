@@ -127,7 +127,7 @@ const MAX_PAGES: usize = 200;
 ///
 /// Verified over USBTMC. Over raw TCP the block framing under-reads each page
 /// by 4x because the length field counts samples, not bytes — see the "Known
-/// limitation" section in the README.
+/// limitation" section in `docs/protocol.md`.
 pub fn capture(inst: &mut impl Scpi, channel: u8, mode: Mode) -> Result<Waveform> {
     ensure_channel_enabled(inst, channel)?;
     set_source(inst, channel)?;

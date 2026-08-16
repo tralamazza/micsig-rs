@@ -11,7 +11,7 @@ keywords = ["scpi", "oscilloscope", "micsig", "usbtmc", "lxi"]
 categories = ["command-line-utilities", "science"]
 # The programming guide is Micsig's copyright, not ours, so it stays out of the
 # published crate; .claude is local tooling.
-exclude = [".claude", "doc/*.pdf"]
+exclude = [".claude", "docs/*.pdf"]
 
 [[bin]]
 name = "micsig"
