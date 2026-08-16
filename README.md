@@ -128,8 +128,10 @@ Sets `:WAVeform:SOURce`, `:WAVeform:MODE` and `:WAVeform:FORMat`, reads
 auto-detected), and scales them to volts using `:WAVeform:PREamble?`. Emits CSV
 (`sample,time_s,voltage_v`) to stdout, or to `--file`.
 
-`--mode raw` reads the full memory depth and is only valid while the scope is
-stopped (`micsig scpi ":MENU:STOP"`).
+The manual says `--mode raw` reads full memory depth and requires a stopped
+scope (`micsig scpi ":MENU:STOP"`). Neither held in testing: it returned data
+while running, and all three modes returned the same 62500 samples, because the
+per-transfer cap below bites long before the 2.2 M memory depth does.
 
 ### `benchmark` — measure request latency
 
@@ -201,7 +203,8 @@ is implemented by the MHO series.
 
 ## Firmware quirks
 
-Verified against an MHO14-200N running firmware 1.97.70:
+Verified against an MHO14-200N reporting firmware 1.97.70 (that string is
+itself unreliable — see the `*IDN?` entry below):
 
 - **The block length field is not always a byte count.** `:SYS:SCR?` reports
   bytes, but `:WAVeform:DATA?` reports a *sample* count and puts four ASCII hex
@@ -259,11 +262,19 @@ framing; it is untested because the unit on hand was only reachable over USB.
 
 ## Testing
 
-`cargo test` covers block-header parsing, preamble parsing, sample decoding,
-and screenshot/benchmark round-trips against an in-process mock instrument.
-`tests/regression.rs` pins the transport edge cases: EOF mid-response, a block
-with no trailing terminator, hostname resolution in `discover`, the waveform
-sample-count length field, and the JFIF marker repair.
+`cargo test` runs 34 tests and needs no instrument attached.
+
+Unit tests cover block-header and preamble parsing, sample decoding, USBTMC
+header packing, timeout parsing, decode-record conversion, and the clap
+definition itself (`Cli::command().debug_assert()`, which catches conflicting
+flag definitions).
+
+`tests/regression.rs` pins the behaviours that hardware testing found the hard
+way, each against a scripted mock socket or a captured payload: EOF
+mid-response, a block with no trailing terminator, hostname resolution in
+`discover`, the sample-count length field, the JFIF marker repair across
+several corrupt values, ASCii-volts detection, and text-versus-binary stdout
+rendering.
 
 ## License
 
