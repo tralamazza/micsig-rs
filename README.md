@@ -1,5 +1,7 @@
 # micsig-rs
 
+[![CI](https://github.com/tralamazza/micsig-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/tralamazza/micsig-rs/actions/workflows/ci.yml)
+
 Command-line tool to interface with a Micsig oscilloscope over SCPI (USB, LAN,
 WiFi). Commands are drawn from the [SCPI Programming Guide][guide], a copy of
 which is vendored at `doc/SCPI Programming Guide- Micsig Oscilloscope.pdf`
@@ -310,7 +312,9 @@ unit on hand was only reachable over USB.
 
 ## Testing
 
-`cargo test` runs 37 tests and needs no instrument attached.
+`cargo test` runs 37 tests and needs no instrument attached, which is what
+lets CI run the whole suite on Linux, macOS and Windows. The workflow also
+enforces `rustfmt` and `clippy`, and builds against the 1.88 MSRV.
 
 Unit tests cover block-header and preamble parsing, sample decoding, USBTMC
 header packing, timeout parsing, decode-record conversion, and the clap
