@@ -4,28 +4,46 @@ use crate::error::Result;
 use crate::transport::Scpi;
 
 /// Capture the current screen image bytes.
+///
+/// Errors if the instrument returns an empty block, which it does when
+/// `:SYS:SCR?` is issued again before the previous capture has completed;
+/// writing the zero-byte result to a file would look like success.
 pub fn capture(inst: &mut impl Scpi) -> Result<Vec<u8>> {
     let raw = inst.query_raw(":SYS:SCR?")?;
     let mut image = crate::scpi::unwrap_block(&raw);
+    if image.is_empty() {
+        return Err(crate::error::Error::Message(
+            "instrument returned an empty screenshot; it may still be busy \
+             with a previous capture"
+                .into(),
+        ));
+    }
     repair_jfif_marker(&mut image);
     Ok(image)
 }
 
 /// Repair the APP0 marker in a Micsig screenshot.
 ///
-/// An MHO14-200N (firmware 1.97.70) emits `FF D8 58 00` where JFIF requires
-/// `FF D8 FF E0`; every other byte of the image is a well-formed JPEG, so the
-/// two-byte fix yields a file that decoders accept. Without it `:SYS:SCR?`
+/// An MHO14-200N (firmware 1.97.70) corrupts the two bytes where JFIF requires
+/// the `FF E0` APP0 marker; every other byte is a well-formed JPEG, so
+/// rewriting them yields a file decoders accept. Without this, `:SYS:SCR?`
 /// output is rejected by every image viewer.
 ///
-/// The patch is deliberately narrow: it only fires on the exact malformed
-/// signature, followed by the `00 10 4A 46 49 46` ("JFIF" segment) that a
-/// correct APP0 would carry.
+/// The corrupt bytes are not stable — `58 00` in most captures, `D8 00` in at
+/// least one — so this anchors on the parts that *are* reliable: the SOI
+/// marker and the `00 10 "JFIF"` APP0 body that follows. Matching the exact
+/// bad signature instead would silently miss the variants.
 pub fn repair_jfif_marker(image: &mut [u8]) {
-    const BROKEN: &[u8] = &[0xFF, 0xD8, 0x58, 0x00, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
-    if image.len() >= BROKEN.len() && image[..BROKEN.len()] == *BROKEN {
-        image[2] = 0xFF;
-        image[3] = 0xE0;
+    const SOI: &[u8] = &[0xFF, 0xD8];
+    const APP0_BODY: &[u8] = &[0x00, 0x10, 0x4A, 0x46, 0x49, 0x46]; // len 16, "JFIF"
+    const APP0_MARKER: &[u8] = &[0xFF, 0xE0];
+
+    if image.len() >= 10
+        && image[0..2] == *SOI
+        && image[4..10] == *APP0_BODY
+        && image[2..4] != *APP0_MARKER
+    {
+        image[2..4].copy_from_slice(APP0_MARKER);
     }
 }
 

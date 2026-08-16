@@ -90,22 +90,45 @@ fn waveform_block_length_is_a_sample_count() {
     assert_eq!(decoded[999], 999);
 }
 
-/// The MHO series emits `FF D8 58 00` instead of a valid `FF D8 FF E0` APP0.
+/// The MHO series corrupts the APP0 marker, and not to a stable value: `58 00`
+/// in most captures, `D8 00` in at least one observed on hardware.
 #[test]
 fn screenshot_jfif_marker_is_repaired() {
-    let mut img = vec![
-        0xFF, 0xD8, 0x58, 0x00, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-    ];
-    micsig_rs::screenshot::repair_jfif_marker(&mut img);
-    assert_eq!(&img[..4], &[0xFF, 0xD8, 0xFF, 0xE0]);
+    for bad in [0x58u8, 0xD8, 0x00, 0x7F] {
+        let mut img = vec![
+            0xFF, 0xD8, bad, 0x00, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+        ];
+        micsig_rs::screenshot::repair_jfif_marker(&mut img);
+        assert_eq!(
+            &img[..4],
+            &[0xFF, 0xD8, 0xFF, 0xE0],
+            "byte {bad:#04x} not repaired"
+        );
+    }
 
-    // A already-valid image must be left alone.
+    // An already-valid image must be left alone.
     let mut ok = vec![
         0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
     ];
     let before = ok.clone();
     micsig_rs::screenshot::repair_jfif_marker(&mut ok);
     assert_eq!(ok, before);
+}
+
+/// Anything that is not a JFIF APP0 header must not be rewritten.
+#[test]
+fn screenshot_repair_leaves_other_data_alone() {
+    // PNG, and a JPEG whose APP0 body does not say "JFIF".
+    for mut data in [
+        b"\x89PNG\r\n\x1a\nfake".to_vec(),
+        vec![
+            0xFF, 0xD8, 0x58, 0x00, 0x00, 0x10, b'E', b'x', b'i', b'f', 0x00, 0x01,
+        ],
+    ] {
+        let before = data.clone();
+        micsig_rs::screenshot::repair_jfif_marker(&mut data);
+        assert_eq!(data, before);
+    }
 }
 
 #[test]

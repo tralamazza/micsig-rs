@@ -110,6 +110,13 @@ the manual calling it PNG). Without `--file`, the image is saved to
 `screenshot_<target>_<timestamp>.jpg`, where `<target>` is the address or
 `usb`. Use `--file -` for stdout.
 
+![Micsig MHO14-200N screen capture: 1 kHz calibration square wave on CH1](doc/screenshot.jpg)
+
+Above: `micsig screenshot` output, unmodified, with CH1 on the probe
+compensation output — a 1 kHz square wave, 2.098 V pk-pk. Note that the file is
+only viewable because the tool repairs the firmware's broken JFIF marker; see
+[Firmware quirks](#firmware-quirks).
+
 ### `waveform` — capture channel data
 
 ```
@@ -175,9 +182,15 @@ Verified against an MHO14-200N running firmware 1.97.70:
 - **`:WAVeform:FORMat WORD` still returns ASCII hex.** The preamble's `format`
   field reads 0 and `:WAVeform:FORMat?` answers `WORD`, so the wire format is
   sniffed rather than trusted.
-- **Screenshots have a corrupt JFIF marker.** `:SYS:SCR?` emits `FF D8 58 00`
-  where JPEG requires `FF D8 FF E0`; the rest of the file is a valid baseline
-  JPEG. `screenshot` repairs those two bytes, otherwise no viewer opens it.
+- **Screenshots have a corrupt JFIF marker.** `:SYS:SCR?` puts garbage where
+  JPEG requires the `FF E0` APP0 marker — `58 00` in most captures, `D8 00` in
+  at least one, so the bad value is not even stable. The rest of the file is a
+  valid baseline JPEG. `screenshot` rewrites those two bytes, anchoring on the
+  surrounding SOI and `00 10 "JFIF"` rather than on the corrupt value;
+  otherwise no viewer opens the file.
+- **Back-to-back `:SYS:SCR?` returns an empty block.** Issued again before the
+  previous capture finishes, the scope answers `#900000000`. `screenshot`
+  treats that as an error rather than writing a zero-byte file.
 - Transfers cap at ~250 KB per `:WAVeform:DATA?`, so deep captures need
   `:WAVeform:STARt`/`:STOP` paging (not yet implemented).
 
