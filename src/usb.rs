@@ -44,6 +44,53 @@ impl Drop for Connection {
     }
 }
 
+/// A Micsig instrument seen on the USB bus.
+#[derive(Debug, Clone)]
+pub struct UsbDevice {
+    pub bus: u8,
+    pub address: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub product: Option<String>,
+    pub serial: Option<String>,
+}
+
+/// Enumerate Micsig instruments attached over USB.
+///
+/// Descriptor strings need the device to be opened, which can fail on a
+/// permission-restricted bus; the device is still reported in that case, just
+/// without its product and serial strings.
+pub fn list_instruments() -> Result<Vec<UsbDevice>> {
+    let context = Context::new().map_err(Error::Usb)?;
+    let mut found = Vec::new();
+
+    for device in context.devices().map_err(Error::Usb)?.iter() {
+        let Ok(desc) = device.device_descriptor() else {
+            continue;
+        };
+        if desc.vendor_id() != MICSIG_VID || desc.product_id() != MICSIG_PID {
+            continue;
+        }
+        let (product, serial) = match device.open() {
+            Ok(handle) => (
+                handle.read_product_string_ascii(&desc).ok(),
+                handle.read_serial_number_string_ascii(&desc).ok(),
+            ),
+            Err(_) => (None, None),
+        };
+        found.push(UsbDevice {
+            bus: device.bus_number(),
+            address: device.address(),
+            vendor_id: desc.vendor_id(),
+            product_id: desc.product_id(),
+            product,
+            serial,
+        });
+    }
+
+    Ok(found)
+}
+
 /// A USBTMC connection to an instrument.
 pub struct UsbInstrument {
     last_btag: u8,

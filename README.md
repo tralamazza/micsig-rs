@@ -12,47 +12,66 @@ cargo build --release
 ## Usage
 
 ```
-micsig <command> [options]
+micsig [connection options] <command> [command options]
 ```
 
-All commands work over TCP (LAN/WiFi) and, with `-u/--usb`, over USBTMC.
+### Connecting
+
+Connection options are global and may appear before or after the subcommand:
+
+| Option | Meaning |
+|---|---|
+| `-u`, `--usb` | Force USBTMC |
+| `-a`, `--address <HOST>` | Force TCP to an IP or hostname |
+| `-p`, `--port <PORT>` | TCP port for `--address` (default `5025`) |
+| `-t`, `--timeout <T>` | `3`, `0.5`, `2s`, `500ms`; per-command default if unset |
+
+With neither `--usb` nor `--address`, the USB bus is searched for a Micsig
+instrument, so a USB-attached scope needs no flags at all. `--usb` and
+`--address` are mutually exclusive.
+
+```
+micsig scpi "*IDN?"                 # auto: finds the USB scope
+micsig -u scpi "*IDN?"              # force USB
+micsig -a 10.0.0.5 scpi "*IDN?"     # force TCP
+```
 
 ### `scpi` — send a command
 
 ```
-micsig scpi [options] <scpi-command>
+micsig scpi [-x] [-i] <scpi-command>
 ```
 
-Options: `-a/--address` (default `127.0.0.1`), `-p/--port` (default `5025`),
-`-t/--timeout` (default `3`), `-x/--hex`, `-i/--interactive`, `-u/--usb`.
+`-x/--hex` prints the response as a hex dump; `-i/--interactive` starts a repl
+(and cannot be combined with a command).
 
 ```
 micsig scpi "*IDN?"
-micsig scpi -u "*IDN?"          # over USB
 micsig scpi -x ":WAVeform:PREamble?"
-micsig scpi -i                  # repl
+micsig scpi -i
 ```
 
 ### `screenshot` — capture the screen
 
 ```
-micsig screenshot [options] [--file <name>]
+micsig screenshot [--file <name>]
 ```
 
 Writes the image captured via `:SYS:SCR?` (JFIF/JPEG on the MHO series, despite
 the manual calling it PNG). Without `--file`, the image is saved to
-`screenshot_<addr>_<timestamp>.jpg`. Use `--file -` for stdout.
+`screenshot_<target>_<timestamp>.jpg`, where `<target>` is the address or
+`usb`. Use `--file -` for stdout.
 
 ### `waveform` — capture channel data
 
 ```
-micsig waveform [options] [--channel <1-4>] [--mode <normal|maximum|raw>] [--file <name>]
+micsig waveform [--channel <1-4>] [--mode <normal|maximum|raw>] [--file <name>]
 ```
 
 Sets `:WAVeform:SOURce`, `:WAVeform:MODE` and `:WAVeform:FORMat`, reads
 `:WAVeform:DATA?`, decodes the 16-bit samples (binary or ASCII-hex,
 auto-detected), and scales them to volts using `:WAVeform:PREamble?`. Emits CSV
-(`sample,time_s,voltage_v`).
+(`sample,time_s,voltage_v`) to stdout, or to `--file`.
 
 `--mode raw` reads the full memory depth and is only valid while the scope is
 stopped (`micsig scpi ":MENU:STOP"`).
@@ -60,18 +79,26 @@ stopped (`micsig scpi ":MENU:STOP"`).
 ### `benchmark` — measure request latency
 
 ```
-micsig benchmark [options] [--count <n>]
+micsig benchmark [--count <n>]
 ```
 
 Sends `n` `*IDN?` requests and reports requests/second.
 
-### `discover` — probe a host
+### `discover` — list instruments
 
 ```
-micsig discover [options] [--ports <p>...]
+micsig discover [--ports <p,...>]
 ```
 
-Probes ports and reports any responding instrument.
+With no `--address`, enumerates Micsig instruments on the USB bus with their
+product name and serial. With `--address`, probes that host over TCP; `--ports`
+overrides the single `--port` with a list.
+
+```
+micsig discover                              # USB bus
+micsig discover -a 10.0.0.5                  # one TCP port
+micsig discover -a 10.0.0.5 --ports 5025,111 # several
+```
 
 ## Notes
 

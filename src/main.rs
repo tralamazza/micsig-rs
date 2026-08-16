@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
@@ -13,9 +14,88 @@ use micsig_rs::{Error, Result};
 /// Interface with a Micsig oscilloscope over SCPI.
 #[derive(Parser)]
 #[command(name = "micsig", version, about)]
+#[command(after_help = "\
+With neither --usb nor --address, the USB bus is searched for a Micsig \
+instrument. Use --address for a LAN/WiFi scope.")]
 struct Cli {
+    #[command(flatten)]
+    conn: ConnectionArgs,
+
     #[command(subcommand)]
     command: Command,
+}
+
+/// Connection options, shared by every subcommand.
+#[derive(Args, Clone)]
+struct ConnectionArgs {
+    /// Connect over USB (USBTMC). The default when no --address is given.
+    #[arg(short = 'u', long, global = true, conflicts_with = "address")]
+    usb: bool,
+
+    /// Instrument IP address or hostname; selects the TCP transport.
+    #[arg(short, long, global = true)]
+    address: Option<String>,
+
+    /// TCP port to use with --address.
+    #[arg(short, long, global = true, default_value_t = DEFAULT_RAW_PORT)]
+    port: u16,
+
+    /// Response timeout, e.g. `3`, `0.5`, `500ms`. Per-command default if unset.
+    #[arg(short, long, global = true, value_parser = parse_timeout)]
+    timeout: Option<Duration>,
+}
+
+/// Parse a timeout as bare seconds (`3`, `0.5`) or with a unit (`500ms`, `2s`).
+fn parse_timeout(s: &str) -> std::result::Result<Duration, String> {
+    let s = s.trim();
+    let (value, scale) = match s.strip_suffix("ms") {
+        Some(v) => (v, 1e-3),
+        None => (s.strip_suffix('s').unwrap_or(s), 1.0),
+    };
+    let secs: f64 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid timeout '{s}'"))?;
+    if !secs.is_finite() || secs <= 0.0 {
+        return Err(format!("timeout must be positive, got '{s}'"));
+    }
+    Ok(Duration::from_secs_f64(secs * scale))
+}
+
+impl ConnectionArgs {
+    /// Open a connection, falling back to USB when no address was given.
+    fn open(&self, default_timeout: u64) -> Result<AnyTransport> {
+        let timeout = self
+            .timeout
+            .unwrap_or_else(|| Duration::from_secs(default_timeout));
+        match &self.address {
+            // clap guarantees --address and --usb are mutually exclusive.
+            Some(address) => Ok(AnyTransport::Tcp(Instrument::connect(
+                address, self.port, timeout,
+            )?)),
+            None => UsbInstrument::connect(timeout)
+                .map(AnyTransport::Usb)
+                .map_err(|e| {
+                    if self.usb {
+                        e
+                    } else {
+                        // Auto-detect: say what was tried, not just "not found".
+                        Error::UsbMsg(format!(
+                            "{e}. Pass --address <host> for a LAN/WiFi scope, \
+                             or --usb to see the raw USB error"
+                        ))
+                    }
+                }),
+        }
+    }
+
+    /// A short label for the connection, used in generated filenames.
+    fn label(&self) -> String {
+        match &self.address {
+            Some(address) => address.clone(),
+            None => "usb".to_string(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -28,34 +108,18 @@ enum Command {
     Waveform(WaveformArgs),
     /// Benchmark request latency by sending repeated `*IDN?` requests.
     Benchmark(BenchmarkArgs),
-    /// Probe a host for a responding instrument.
+    /// List instruments: USB devices, or a TCP host given --address.
     Discover(DiscoverArgs),
 }
 
 #[derive(Args)]
 struct ScpiArgs {
-    /// Connect over USB instead of TCP.
-    #[arg(short = 'u', long)]
-    usb: bool,
-
-    /// Instrument IP address or hostname.
-    #[arg(short, long, default_value = "127.0.0.1")]
-    address: String,
-
-    /// Raw SCPI-raw TCP port.
-    #[arg(short, long, default_value_t = DEFAULT_RAW_PORT)]
-    port: u16,
-
-    /// Response timeout in seconds.
-    #[arg(short, long, default_value_t = 3)]
-    timeout: u64,
-
     /// Print the response as hexadecimal.
     #[arg(short = 'x', long)]
     hex: bool,
 
     /// Enter interactive mode (repl).
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "command")]
     interactive: bool,
 
     /// The SCPI command to send (e.g. `*IDN?`).
@@ -65,54 +129,23 @@ struct ScpiArgs {
 
 #[derive(Args)]
 struct ScreenshotArgs {
-    /// Connect over USB instead of TCP.
-    #[arg(short = 'u', long)]
-    usb: bool,
-
-    /// Instrument IP address or hostname.
-    #[arg(short, long, default_value = "127.0.0.1")]
-    address: String,
-
-    /// Raw SCPI-raw TCP port.
-    #[arg(short, long, default_value_t = DEFAULT_RAW_PORT)]
-    port: u16,
-
-    /// Response timeout in seconds.
-    #[arg(short, long, default_value_t = 10)]
-    timeout: u64,
-
-    /// Output filename, or `-` for stdout. Defaults to `screenshot_<addr>_<timestamp>.jpg`.
+    /// Output filename, or `-` for stdout.
+    /// Defaults to `screenshot_<target>_<timestamp>.jpg`.
     #[arg(short, long)]
     file: Option<String>,
 }
 
 #[derive(Args)]
 struct WaveformArgs {
-    /// Connect over USB instead of TCP.
-    #[arg(short = 'u', long)]
-    usb: bool,
-
-    /// Instrument IP address or hostname.
-    #[arg(short, long, default_value = "127.0.0.1")]
-    address: String,
-
-    /// Raw SCPI-raw TCP port.
-    #[arg(short, long, default_value_t = DEFAULT_RAW_PORT)]
-    port: u16,
-
-    /// Response timeout in seconds.
-    #[arg(short, long, default_value_t = 10)]
-    timeout: u64,
-
-    /// Channel to read (1-4).
-    #[arg(short, long, default_value_t = 1)]
+    /// Channel to read.
+    #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
     channel: u8,
 
     /// Read mode. `raw` reads full memory depth and needs a stopped scope.
     #[arg(short = 'm', long, value_enum, default_value_t = ModeArg::Normal)]
     mode: ModeArg,
 
-    /// Output CSV filename, or `-` for stdout.
+    /// Output CSV filename, or `-` for stdout (the default).
     #[arg(short, long)]
     file: Option<String>,
 }
@@ -136,40 +169,16 @@ impl From<ModeArg> for waveform::Mode {
 
 #[derive(Args)]
 struct BenchmarkArgs {
-    /// Connect over USB instead of TCP.
-    #[arg(short = 'u', long)]
-    usb: bool,
-
-    /// Instrument IP address or hostname.
-    #[arg(short, long, default_value = "127.0.0.1")]
-    address: String,
-
-    /// Raw SCPI-raw TCP port.
-    #[arg(short, long, default_value_t = DEFAULT_RAW_PORT)]
-    port: u16,
-
-    /// Response timeout in seconds.
-    #[arg(short, long, default_value_t = 3)]
-    timeout: u64,
-
     /// Number of requests to send.
-    #[arg(short, long, default_value_t = 100)]
-    count: usize,
+    #[arg(short, long, default_value = "100")]
+    count: NonZeroUsize,
 }
 
 #[derive(Args)]
 struct DiscoverArgs {
-    /// Host to probe.
-    #[arg(short, long, default_value = "127.0.0.1")]
-    address: String,
-
-    /// Ports to probe.
-    #[arg(short, long, default_values_t = vec![DEFAULT_RAW_PORT])]
-    ports: Vec<u16>,
-
-    /// Probe timeout in seconds.
-    #[arg(short, long, default_value_t = 1)]
-    timeout: u64,
+    /// Ports to probe on --address. Defaults to --port.
+    #[arg(long, num_args = 1.., value_delimiter = ',')]
+    ports: Option<Vec<u16>>,
 }
 
 /// A transport that can be either TCP or USB.
@@ -201,23 +210,12 @@ impl Scpi for AnyTransport {
     }
 }
 
-fn connect(usb: bool, address: &str, port: u16, timeout: u64) -> Result<AnyTransport> {
-    let timeout = Duration::from_secs(timeout);
-    if usb {
-        Ok(AnyTransport::Usb(UsbInstrument::connect(timeout)?))
-    } else {
-        Ok(AnyTransport::Tcp(Instrument::connect(
-            address, port, timeout,
-        )?))
-    }
-}
-
-fn scpi_command(args: ScpiArgs) -> Result<()> {
+fn scpi_command(conn: &ConnectionArgs, args: ScpiArgs) -> Result<()> {
     if args.interactive {
-        return interactive(args.usb, &args.address, args.port, args.timeout, args.hex);
+        return interactive(conn, args.hex);
     }
     let command = args.command.as_deref().unwrap_or_default();
-    let mut inst = connect(args.usb, &args.address, args.port, args.timeout)?;
+    let mut inst = conn.open(3)?;
     if micsig_rs::scpi::is_query(command) {
         let resp = inst.query_raw(command)?;
         if args.hex {
@@ -231,14 +229,13 @@ fn scpi_command(args: ScpiArgs) -> Result<()> {
     Ok(())
 }
 
-fn interactive(usb: bool, address: &str, port: u16, timeout: u64, hex: bool) -> Result<()> {
+fn interactive(conn: &ConnectionArgs, hex: bool) -> Result<()> {
     use std::io::{BufRead, Write};
 
-    let mut inst = connect(usb, address, port, timeout)?;
-    if usb {
-        println!("Connected over USB");
-    } else {
-        println!("Connected to {address}:{port}");
+    let mut inst = conn.open(3)?;
+    match &conn.address {
+        Some(address) => println!("Connected to {address}:{}", conn.port),
+        None => println!("Connected over USB"),
     }
     println!("Entering interactive mode (ctrl-d to quit)\n");
 
@@ -303,12 +300,12 @@ fn print_hex(bytes: &[u8]) -> Result<()> {
     out.flush().map_err(Error::Io)
 }
 
-fn screenshot_command(args: ScreenshotArgs) -> Result<()> {
-    let mut inst = connect(args.usb, &args.address, args.port, args.timeout)?;
+fn screenshot_command(conn: &ConnectionArgs, args: ScreenshotArgs) -> Result<()> {
+    let mut inst = conn.open(10)?;
     let filename = match args.file.as_deref() {
         Some("-") => None,
         Some(f) => Some(f.to_string()),
-        None => Some(default_filename(&args.address, "jpg")),
+        None => Some(default_filename(&conn.label(), "jpg")),
     };
     screenshot::save(&mut inst, filename.as_deref())?;
     if let Some(f) = &filename {
@@ -317,8 +314,8 @@ fn screenshot_command(args: ScreenshotArgs) -> Result<()> {
     Ok(())
 }
 
-fn waveform_command(args: WaveformArgs) -> Result<()> {
-    let mut inst = connect(args.usb, &args.address, args.port, args.timeout)?;
+fn waveform_command(conn: &ConnectionArgs, args: WaveformArgs) -> Result<()> {
+    let mut inst = conn.open(10)?;
     let wave = waveform::capture(&mut inst, args.channel, args.mode.into())?;
     let volts = waveform::samples_to_volts(&wave);
     match args.file.as_deref() {
@@ -348,32 +345,54 @@ fn write_waveform_csv(
     Ok(())
 }
 
-fn benchmark_command(args: BenchmarkArgs) -> Result<()> {
-    let mut inst = connect(args.usb, &args.address, args.port, args.timeout)?;
-    benchmark::run_with_progress(&mut inst, args.count)?;
+fn benchmark_command(conn: &ConnectionArgs, args: BenchmarkArgs) -> Result<()> {
+    let mut inst = conn.open(3)?;
+    benchmark::run_with_progress(&mut inst, args.count.get())?;
     Ok(())
 }
 
-fn discover_command(args: DiscoverArgs) -> Result<()> {
-    println!(
-        "Probing {} for instruments - please wait...\n",
-        args.address
-    );
-    let timeout = Duration::from_secs(args.timeout);
-    let devices = discover::scan_ports(&args.address, &args.ports, timeout);
+/// List instruments: USB devices by default, or a TCP host given --address.
+fn discover_command(conn: &ConnectionArgs, args: DiscoverArgs) -> Result<()> {
+    let timeout = conn.timeout.unwrap_or(Duration::from_secs(1));
+
+    let Some(address) = &conn.address else {
+        println!("Scanning the USB bus for Micsig instruments...\n");
+        let devices = micsig_rs::usb::list_instruments()?;
+        if devices.is_empty() {
+            println!("No USB instruments found");
+            return Ok(());
+        }
+        for d in &devices {
+            let name = d.product.as_deref().unwrap_or("Micsig instrument");
+            print!(
+                "  Found \"{name}\" at bus {:03} device {:03} ({:04x}:{:04x})",
+                d.bus, d.address, d.vendor_id, d.product_id
+            );
+            match &d.serial {
+                Some(s) => println!(" serial {s}"),
+                None => println!(),
+            }
+        }
+        println!("Found {} device{}", devices.len(), plural(devices.len()));
+        return Ok(());
+    };
+
+    let ports = args.ports.clone().unwrap_or_else(|| vec![conn.port]);
+    println!("Probing {address} for instruments - please wait...\n");
+    let devices = discover::scan_ports(address, &ports, timeout);
     if devices.is_empty() {
         println!("No devices found");
     } else {
         for d in &devices {
             println!("  Found \"{}\" on address {}", d.id.trim(), d.address);
         }
-        println!(
-            "Found {} device{}",
-            devices.len(),
-            if devices.len() > 1 { "s" } else { "" }
-        );
+        println!("Found {} device{}", devices.len(), plural(devices.len()));
     }
     Ok(())
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 fn default_filename(address: &str, ext: &str) -> String {
@@ -388,15 +407,46 @@ fn default_filename(address: &str, ext: &str) -> String {
 
 fn main() {
     let cli = Cli::parse();
+    let conn = cli.conn;
     let result = match cli.command {
-        Command::Scpi(args) => scpi_command(args),
-        Command::Screenshot(args) => screenshot_command(args),
-        Command::Waveform(args) => waveform_command(args),
-        Command::Benchmark(args) => benchmark_command(args),
-        Command::Discover(args) => discover_command(args),
+        Command::Scpi(args) => scpi_command(&conn, args),
+        Command::Screenshot(args) => screenshot_command(&conn, args),
+        Command::Waveform(args) => waveform_command(&conn, args),
+        Command::Benchmark(args) => benchmark_command(&conn, args),
+        Command::Discover(args) => discover_command(&conn, args),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_timeout_units() {
+        assert_eq!(parse_timeout("3").unwrap(), Duration::from_secs(3));
+        assert_eq!(parse_timeout("2s").unwrap(), Duration::from_secs(2));
+        assert_eq!(parse_timeout("0.5").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_timeout("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(
+            parse_timeout(" 1.5s ").unwrap(),
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_timeouts() {
+        for bad in ["abc", "", "0", "-5", "nan", "inf", "5x"] {
+            assert!(parse_timeout(bad).is_err(), "'{bad}' should be rejected");
+        }
+    }
+
+    #[test]
+    fn cli_verifies() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }
