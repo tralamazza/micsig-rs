@@ -80,10 +80,8 @@ impl ConnectionArgs {
                         e
                     } else {
                         // Auto-detect: say what was tried, not just "not found".
-                        Error::UsbMsg(format!(
-                            "{e}. Pass --address <host> for a LAN/WiFi scope, \
-                             or --usb to see the raw USB error"
-                        ))
+                        // Message, not UsbMsg: `e` already carries its own prefix.
+                        Error::Message(format!("{e}. Pass --address <host> for a LAN/WiFi scope"))
                     }
                 }),
         }
@@ -371,6 +369,12 @@ fn discover_command(conn: &ConnectionArgs, args: DiscoverArgs) -> Result<()> {
             match &d.serial {
                 Some(s) => println!(" serial {s}"),
                 None => println!(),
+            }
+            if !d.accessible {
+                println!(
+                    "    (cannot be opened: check permissions - on Linux this \
+                     usually means a missing udev rule)"
+                );
             }
         }
         println!("Found {} device{}", devices.len(), plural(devices.len()));

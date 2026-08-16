@@ -18,6 +18,11 @@ pub enum Error {
     #[error("USB: {0}")]
     UsbMsg(String),
 
+    /// A message that is already fully composed, used when wrapping another
+    /// error's text so its prefix is not repeated.
+    #[error("{0}")]
+    Message(String),
+
     #[error("failed to parse SCPI block header: {0}")]
     BlockHeader(String),
 

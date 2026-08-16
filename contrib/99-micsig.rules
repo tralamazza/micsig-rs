@@ -1,0 +1,10 @@
+# Micsig oscilloscope (18d1:0007) — grant USB access to local users.
+#
+# Install:
+#   sudo cp contrib/99-micsig.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# then unplug and replug the scope.
+#
+# TAG+="uaccess" grants the logged-in user access via systemd-logind; the
+# GROUP fallback covers systems without it.
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="0007", MODE="0660", GROUP="plugdev", TAG+="uaccess"

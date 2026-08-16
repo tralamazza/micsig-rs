@@ -9,6 +9,53 @@ WiFi). Commands are drawn from `doc/SCPI Programming Guide- Micsig Oscilloscope.
 cargo build --release
 ```
 
+## Platform support
+
+| Platform | Status |
+|---|---|
+| macOS (aarch64) | Verified end-to-end against an MHO14-200N over USBTMC |
+| Linux (aarch64, Ubuntu 26.04) | Builds, all tests pass; USB data path untested (no device) |
+| Windows | Untested |
+
+There are no `cfg(target_os)` branches in the source; the only platform-specific
+dependency is libusb. Requires Rust 1.88 or newer.
+
+### Linux
+
+`libusb1-sys` bundles libusb and builds it if `pkg-config` cannot find one, so
+a C compiler is the only hard requirement — verified on a clean Ubuntu 26.04
+image with neither `pkg-config` nor libusb installed, where it statically links
+a vendored libusb using the netlink backend. Installing the system libraries is
+still preferable, since it links `libusb-1.0.so` and picks up the udev backend:
+
+```
+sudo apt install pkg-config libusb-1.0-0-dev libudev-dev   # Debian/Ubuntu
+```
+
+**USB permissions.** Without a udev rule, libusb cannot open the device and
+every command fails. Create `/etc/udev/rules.d/99-micsig.rules`:
+
+```
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="0007", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+```
+
+then reload and replug:
+
+```
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+`micsig discover` flags a device it can see but cannot open, and the connection
+error names the udev rule rather than claiming nothing was found.
+
+**Kernel `usbtmc` driver.** The scope's interface 1 is class `FE`/`03`, which
+Linux's in-tree `usbtmc` driver binds, creating `/dev/usbtmc0` and holding the
+interface. `micsig` asks libusb to auto-detach it on claim and reattach on
+release, so the two can coexist; detaching needs the same permissions as above.
+
+Note that `18d1` is Google's vendor ID (the scope runs Android), so an existing
+`android-udev-rules` package may already grant access.
+
 ## Usage
 
 ```

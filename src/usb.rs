@@ -53,6 +53,9 @@ pub struct UsbDevice {
     pub product_id: u16,
     pub product: Option<String>,
     pub serial: Option<String>,
+    /// False when the device could not be opened, typically a missing udev
+    /// rule on Linux. It is still listed, but cannot be talked to.
+    pub accessible: bool,
 }
 
 /// Enumerate Micsig instruments attached over USB.
@@ -71,12 +74,13 @@ pub fn list_instruments() -> Result<Vec<UsbDevice>> {
         if desc.vendor_id() != MICSIG_VID || desc.product_id() != MICSIG_PID {
             continue;
         }
-        let (product, serial) = match device.open() {
+        let (product, serial, accessible) = match device.open() {
             Ok(handle) => (
                 handle.read_product_string_ascii(&desc).ok(),
                 handle.read_serial_number_string_ascii(&desc).ok(),
+                true,
             ),
-            Err(_) => (None, None),
+            Err(_) => (None, None, false),
         };
         found.push(UsbDevice {
             bus: device.bus_number(),
@@ -85,6 +89,7 @@ pub fn list_instruments() -> Result<Vec<UsbDevice>> {
             product_id: desc.product_id(),
             product,
             serial,
+            accessible,
         });
     }
 
@@ -191,6 +196,11 @@ impl UsbInstrument {
         let context = Context::new().map_err(Error::Usb)?;
         let devices = context.devices().map_err(Error::Usb)?;
 
+        // Why a matching device could not be used. Reported instead of a bare
+        // "not found", which on Linux sends people hunting for the wrong
+        // problem when the real one is a missing udev rule.
+        let mut rejected: Option<String> = None;
+
         for device in devices.iter() {
             let device_desc = match device.device_descriptor() {
                 Ok(d) => d,
@@ -202,38 +212,66 @@ impl UsbInstrument {
 
             let config_desc = match device.active_config_descriptor() {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    rejected.get_or_insert(format!("cannot read its configuration ({e})"));
+                    continue;
+                }
             };
 
-            let Some(out_endpoint) =
-                Self::find_endpoint(&config_desc, TransferType::Bulk, Direction::Out)
-            else {
-                continue;
-            };
-            let Some(in_endpoint) =
-                Self::find_endpoint(&config_desc, TransferType::Bulk, Direction::In)
-            else {
+            let out_endpoint =
+                Self::find_endpoint(&config_desc, TransferType::Bulk, Direction::Out);
+            let in_endpoint = Self::find_endpoint(&config_desc, TransferType::Bulk, Direction::In);
+            let (Some(out_endpoint), Some(in_endpoint)) = (out_endpoint, in_endpoint) else {
+                rejected.get_or_insert("it exposes no bulk endpoint pair".to_string());
                 continue;
             };
 
             let handle = match device.open() {
                 Ok(h) => h,
-                Err(_) => continue,
+                Err(e) => {
+                    rejected.get_or_insert(match e {
+                        rusb::Error::Access => format!(
+                            "permission denied ({e}). On Linux, install a udev rule for \
+                             {MICSIG_VID:04x}:{MICSIG_PID:04x} or run as root — see the README"
+                        ),
+                        _ => format!("cannot open it ({e})"),
+                    });
+                    continue;
+                }
             };
 
+            // Lets libusb detach the kernel driver on claim and reattach on
+            // release. On Linux the in-tree usbtmc driver binds this exact
+            // interface class, so without this the claim below fails with
+            // "resource busy". Unsupported on macOS, where it is a no-op.
+            let auto_detach = handle.set_auto_detach_kernel_driver(true).is_ok();
+
             let mut detached_ifaces = Vec::new();
+            let mut claimed = Vec::new();
             for iface in [out_endpoint.iface, in_endpoint.iface] {
-                if detached_ifaces.contains(&iface) {
+                if claimed.contains(&iface) {
                     continue;
                 }
                 // kernel_driver_active is unreliable on macOS (reports true for
                 // interfaces owned by user-space daemons, where detach fails).
-                if handle.kernel_driver_active(iface).unwrap_or(false)
+                if !auto_detach
+                    && handle.kernel_driver_active(iface).unwrap_or(false)
                     && handle.detach_kernel_driver(iface).is_ok()
                 {
                     detached_ifaces.push(iface);
                 }
-                handle.claim_interface(iface).map_err(Error::Usb)?;
+                handle.claim_interface(iface).map_err(|e| match e {
+                    rusb::Error::Busy => Error::UsbMsg(format!(
+                        "interface {iface} is busy ({e}); another process or the kernel \
+                         usbtmc driver holds it"
+                    )),
+                    rusb::Error::Access => Error::UsbMsg(format!(
+                        "permission denied claiming interface {iface} ({e}); \
+                         see the Linux setup notes in the README"
+                    )),
+                    other => Error::Usb(other),
+                })?;
+                claimed.push(iface);
             }
 
             self.connection = Some(Connection {
@@ -245,9 +283,12 @@ impl UsbInstrument {
             return Ok(());
         }
 
-        Err(Error::UsbMsg(
-            "Micsig instrument not found on USB bus".into(),
-        ))
+        Err(Error::UsbMsg(match rejected {
+            Some(reason) => format!(
+                "found a Micsig instrument ({MICSIG_VID:04x}:{MICSIG_PID:04x}) but {reason}"
+            ),
+            None => "Micsig instrument not found on USB bus".to_string(),
+        }))
     }
 
     fn write_data(&mut self, data: &[u8]) -> Result<()> {

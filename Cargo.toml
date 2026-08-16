@@ -2,6 +2,8 @@
 name = "micsig-rs"
 version = "0.1.0"
 edition = "2024"
+# Edition 2024 needs 1.85; let-chains in discover.rs/waveform.rs need 1.88.
+rust-version = "1.88"
 description = "Command-line tool to interface with a Micsig oscilloscope over SCPI"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tralamazza/micsig-rs"
