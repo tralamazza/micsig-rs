@@ -1,23 +1,31 @@
 //! Waveform data acquisition via the `:WAVeform:*` command subsystem.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::scpi::{self, Preamble};
 use crate::transport::Scpi;
 
-/// Formats understood by `:WAVeform:FORMat`.
+/// Formats understood by `:WAVeform:FORMat` that this module can decode.
+///
+/// The instrument also accepts `ASCii`, which is deliberately not offered
+/// here: it returns comma-separated volts in scientific notation
+/// (`1.148325e-02,...`) rather than raw samples, so it does not fit the
+/// sample-plus-preamble model the rest of this module is built on, and
+/// feeding it to [`decode_samples`] would silently yield nonsense. Both
+/// variants below were verified on an MHO14-200N to put four ASCII hex
+/// characters per sample on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// 16-bit signed words (two bytes per sample).
+    /// 16-bit samples.
     Word,
-    /// ASCII scientific notation, comma-separated.
-    Ascii,
+    /// 8-bit samples.
+    Byte,
 }
 
 impl Format {
     fn as_str(self) -> &'static str {
         match self {
             Format::Word => "WORD",
-            Format::Ascii => "ASCii",
+            Format::Byte => "BYTE",
         }
     }
 }
@@ -68,9 +76,33 @@ pub fn set_mode(inst: &mut impl Scpi, mode: Mode) -> Result<()> {
 }
 
 /// Read the preamble for the currently selected source.
+///
+/// The instrument only refreshes the preamble when `:WAVeform:SOURce` is
+/// written, so [`capture`] sets the source before calling this. Query it
+/// out of that order and the scaling describes whichever channel was
+/// selected previously.
 pub fn preamble(inst: &mut impl Scpi) -> Result<Preamble> {
     let resp = inst.query(":WAVeform:PREamble?")?;
     scpi::parse_preamble(&resp)
+}
+
+/// Fail if a channel is switched off.
+///
+/// `:WAVeform:DATA?` on a disabled channel does not return an error or an
+/// empty block — it returns stale data belonging to whichever channel was
+/// last acquired. Observed on an MHO14-200N: with only CH1 displayed,
+/// `-c 2` returned CH1's square wave, and `-c 3` returned a copy of CH2's
+/// trace. The result looks entirely plausible, so it has to be caught here.
+pub fn ensure_channel_enabled(inst: &mut impl Scpi, channel: u8) -> Result<()> {
+    let displayed = inst.query(&format!(":CHANnel{channel}:DISPlay?"))?;
+    if displayed.trim() == "0" {
+        return Err(Error::Message(format!(
+            "channel {channel} is switched off; the instrument would return \
+             another channel's data. Enable it with: \
+             micsig scpi \":CHANnel{channel}:DISPlay ON\""
+        )));
+    }
+    Ok(())
 }
 
 /// Capture the waveform for a channel and decode it into signed samples.
@@ -79,13 +111,35 @@ pub fn preamble(inst: &mut impl Scpi) -> Result<Preamble> {
 /// response by 4x because the length field counts samples, not bytes — see
 /// the "Known limitation" section in the README.
 pub fn capture(inst: &mut impl Scpi, channel: u8, mode: Mode) -> Result<Waveform> {
+    ensure_channel_enabled(inst, channel)?;
     set_source(inst, channel)?;
     set_mode(inst, mode)?;
     set_format(inst, Format::Word)?;
     let preamble = preamble(inst)?;
     let raw = inst.query_raw(":WAVeform:DATA?")?;
+    if looks_like_ascii_volts(&raw) {
+        return Err(Error::Message(
+            "instrument is returning ASCii-format volts, not raw samples; \
+             `:WAVeform:FORMat WORD` did not take effect"
+                .into(),
+        ));
+    }
     let samples = decode_data_block(&raw);
+    if samples.is_empty() {
+        return Err(Error::Message(format!(
+            "instrument returned no samples for channel {channel}; \
+             the scope may be mid-acquisition, or try a different --mode"
+        )));
+    }
     Ok(Waveform { preamble, samples })
+}
+
+/// True if a `:WAVeform:DATA?` payload is ASCii-format volts rather than the
+/// hex/binary samples this module decodes. Scientific notation is
+/// unmistakable: hex sample data contains neither `.` nor an exponent sign.
+pub fn looks_like_ascii_volts(raw: &[u8]) -> bool {
+    let head = &raw[..raw.len().min(64)];
+    head.contains(&b'.') && head.iter().any(|b| matches!(b, b'e' | b'E'))
 }
 
 /// Decode a `:WAVeform:DATA?` response.

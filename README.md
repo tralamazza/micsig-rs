@@ -191,6 +191,18 @@ Verified against an MHO14-200N running firmware 1.97.70:
 - **Back-to-back `:SYS:SCR?` returns an empty block.** Issued again before the
   previous capture finishes, the scope answers `#900000000`. `screenshot`
   treats that as an error rather than writing a zero-byte file.
+- **A disabled channel returns another channel's data.** `:WAVeform:DATA?` for
+  a channel that is switched off does not error or return an empty block — it
+  returns stale samples from whichever channel was last acquired. With only
+  CH1 displayed, `-c 2` returned CH1's square wave and `-c 3` returned a copy
+  of CH2's trace. `waveform` checks `:CHANnel<n>:DISPlay?` first and refuses.
+- **`:WAVeform:PREamble?` only refreshes when `:WAVeform:SOURce` is written.**
+  Query it out of that order and the scaling describes the previously selected
+  channel. `capture` sets the source first, so its volts are correct — measured
+  within 1% of the instrument's own pk-pk reading at 0.49, 1.0 and 2.0 V/div.
+- **`:WAVeform:FORMat ASCii` returns volts, not samples** — comma-separated
+  scientific notation (`1.148325e-02,...`), already scaled. It does not fit the
+  sample-plus-preamble model, so only `WORD` and `BYTE` are offered.
 - Transfers cap at ~250 KB per `:WAVeform:DATA?`, so deep captures need
   `:WAVeform:STARt`/`:STOP` paging (not yet implemented).
 

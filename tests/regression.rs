@@ -142,3 +142,26 @@ fn truncated_block_payload_is_an_error() {
     let mut inst = connect(port, 2);
     assert!(inst.query_raw(":SYS:SCR?").is_err());
 }
+
+/// `:WAVeform:FORMat ASCii` returns comma-separated volts in scientific
+/// notation, which the sample decoder would happily reinterpret as
+/// little-endian i16 and turn into nonsense.
+#[test]
+fn ascii_volts_payload_is_recognised() {
+    let ascii = b"1.148325e-02,1.658691e-02,1.531099e-02";
+    assert!(micsig_rs::waveform::looks_like_ascii_volts(ascii));
+
+    // Real hex sample payloads must not be mistaken for it.
+    for hex in [
+        &b"FFFF000300000001"[..],
+        &b"0002, FFFF 0000"[..],
+        &b"#9000062500"[..],
+    ] {
+        assert!(
+            !micsig_rs::waveform::looks_like_ascii_volts(hex),
+            "hex payload {:?} misread as ASCii volts",
+            String::from_utf8_lossy(hex)
+        );
+    }
+    assert!(!micsig_rs::waveform::looks_like_ascii_volts(b""));
+}

@@ -420,9 +420,20 @@ fn main() {
         Command::Discover(args) => discover_command(&conn, args),
     };
     if let Err(e) = result {
+        // `micsig waveform | head` closes stdout early. Rust ignores SIGPIPE,
+        // so the write surfaces as EPIPE; reporting it as a failure would be
+        // noise for what is ordinary shell usage.
+        if is_broken_pipe(&e) {
+            std::process::exit(0);
+        }
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// True if the error is a downstream reader closing the pipe.
+fn is_broken_pipe(e: &Error) -> bool {
+    matches!(e, Error::Io(io) if io.kind() == std::io::ErrorKind::BrokenPipe)
 }
 
 #[cfg(test)]
