@@ -291,6 +291,15 @@ impl UsbInstrument {
         }))
     }
 
+    /// The live connection. Callers run `ensure_connection` first, so this is
+    /// an error rather than a panic only to keep a refactor from introducing
+    /// one.
+    fn connection(&self) -> Result<&Connection> {
+        self.connection
+            .as_ref()
+            .ok_or_else(|| Error::UsbMsg("not connected".into()))
+    }
+
     fn write_data(&mut self, data: &[u8]) -> Result<()> {
         self.ensure_connection()?;
         let timeout = self.timeout;
@@ -307,7 +316,7 @@ impl UsbInstrument {
             let padding = (4 - (chunk_size % 4)) % 4;
             req.resize(req.len() + padding, 0x00);
 
-            let connection = self.connection.as_ref().unwrap();
+            let connection = self.connection()?;
             connection
                 .handle
                 .write_bulk(connection.out_endpoint.address, &req, timeout)
@@ -327,7 +336,7 @@ impl UsbInstrument {
         // Request the response: the scope only delivers data on bulk IN after
         // the host sends a DEV_DEP_MSG_IN request header.
         let req = self.pack_dev_dep_msg_in_header(self.max_transfer_size);
-        let connection = self.connection.as_ref().unwrap();
+        let connection = self.connection()?;
         connection
             .handle
             .write_bulk(connection.out_endpoint.address, &req, self.timeout)
@@ -339,7 +348,7 @@ impl UsbInstrument {
         self.ensure_connection()?;
         let deadline = Instant::now() + self.timeout;
 
-        let connection = self.connection.as_ref().unwrap();
+        let connection = self.connection()?;
         let in_ep = connection.in_endpoint.address;
 
         let mut buf = vec![0u8; READ_BUFFER_SIZE];

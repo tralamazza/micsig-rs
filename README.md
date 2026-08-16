@@ -6,7 +6,8 @@ WiFi). Commands are drawn from `doc/SCPI Programming Guide- Micsig Oscilloscope.
 ## Build
 
 ```
-cargo build --release
+cargo build --release      # binary at target/release/micsig
+cargo install --path .     # or install it onto your PATH
 ```
 
 ## Platform support
