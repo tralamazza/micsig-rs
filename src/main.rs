@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -179,6 +180,35 @@ struct DiscoverArgs {
     ports: Option<Vec<u16>>,
 }
 
+/// Write to stdout, exiting quietly if the reader has closed the pipe.
+///
+/// Rust ignores SIGPIPE at startup, so `println!` *panics* on EPIPE — piping
+/// any of this tool's output into `head` produced a Rust backtrace. Restoring
+/// the default SIGPIPE disposition would fix that, but it would also turn a
+/// write to a half-closed TCP socket into a fatal signal instead of a clean
+/// error, so the pipe is handled here instead.
+fn out_write(args: std::fmt::Arguments<'_>, newline: bool) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let wrote = if newline {
+        writeln!(out, "{args}")
+    } else {
+        write!(out, "{args}")
+    };
+    if wrote.is_err() || out.flush().is_err() {
+        std::process::exit(0);
+    }
+}
+
+macro_rules! outln {
+    () => { out_write(format_args!(""), true) };
+    ($($arg:tt)*) => { out_write(format_args!($($arg)*), true) };
+}
+
+macro_rules! out {
+    ($($arg:tt)*) => { out_write(format_args!($($arg)*), false) };
+}
+
 /// A transport that can be either TCP or USB.
 enum AnyTransport {
     Tcp(Instrument),
@@ -228,20 +258,19 @@ fn scpi_command(conn: &ConnectionArgs, args: ScpiArgs) -> Result<()> {
 }
 
 fn interactive(conn: &ConnectionArgs, hex: bool) -> Result<()> {
-    use std::io::{BufRead, Write};
+    use std::io::BufRead;
 
     let mut inst = conn.open(3)?;
     match &conn.address {
-        Some(address) => println!("Connected to {address}:{}", conn.port),
-        None => println!("Connected over USB"),
+        Some(address) => outln!("Connected to {address}:{}", conn.port),
+        None => outln!("Connected over USB"),
     }
-    println!("Entering interactive mode (ctrl-d to quit)\n");
+    outln!("Entering interactive mode (ctrl-d to quit)\n");
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     loop {
-        print!("micsig> ");
-        std::io::stdout().flush().map_err(Error::Io)?;
+        out!("micsig> "); // flushes internally
         let Some(line) = lines.next() else { break };
         let Ok(line) = line else { break };
         let command = line.trim();
@@ -269,19 +298,58 @@ fn interactive(conn: &ConnectionArgs, hex: bool) -> Result<()> {
             eprintln!("{e}");
         }
     }
-    println!();
+    outln!();
     Ok(())
 }
 
-/// Print a binary response to stdout, tolerating a closed pipe.
+/// True if a response is unambiguously text: valid UTF-8 with no control
+/// characters beyond the usual whitespace.
+///
+/// Binary payloads fail this on the first stray byte — a JPEG's `FF` is not
+/// legal UTF-8, and its `00` bytes are control characters.
+fn is_text_response(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|s| {
+        !s.chars()
+            .any(|c| c.is_control() && !matches!(c, '\r' | '\n' | '\t'))
+    })
+}
+
+/// Render a response for stdout.
+///
+/// Text is stripped of its SCPI terminators and given exactly one newline, so
+/// `$(micsig scpi ":CHANnel1:SCALe?")` yields `0.49` rather than `0.49\r`.
+/// Anything else is passed through byte for byte — `micsig scpi ":SYS:SCR?"`
+/// must still redirect to a usable file, which also means no newline is
+/// appended to binary the way it once was.
+fn render_response(bytes: &[u8]) -> Cow<'_, [u8]> {
+    if !is_text_response(bytes) {
+        return Cow::Borrowed(bytes);
+    }
+    let end = bytes
+        .iter()
+        .rposition(|b| !matches!(b, b'\r' | b'\n'))
+        .map_or(0, |i| i + 1);
+    let mut out = Vec::with_capacity(end + 1);
+    out.extend_from_slice(&bytes[..end]);
+    out.push(b'\n');
+    Cow::Owned(out)
+}
+
+/// Map a stdout write failure, exiting quietly when the reader has gone away
+/// so that `| head` behaves like it does for any other Unix filter.
+fn stdout_err(e: std::io::Error) -> Error {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        std::process::exit(0);
+    }
+    Error::Io(e)
+}
+
+/// Print a response to stdout.
 fn print_stdout(bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
-    out.write_all(bytes).map_err(Error::Io)?;
-    if !bytes.ends_with(b"\n") {
-        out.write_all(b"\n").map_err(Error::Io)?;
-    }
-    out.flush().map_err(Error::Io)
+    out.write_all(&render_response(bytes)).map_err(stdout_err)?;
+    out.flush().map_err(stdout_err)
 }
 
 /// Print a hex dump of the response, tolerating a closed pipe.
@@ -290,12 +358,12 @@ fn print_hex(bytes: &[u8]) -> Result<()> {
     let mut out = std::io::stdout().lock();
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 && i % 16 == 0 {
-            out.write_all(b"\n").map_err(Error::Io)?;
+            out.write_all(b"\n").map_err(stdout_err)?;
         }
-        write!(out, "{b:02x} ").map_err(Error::Io)?;
+        write!(out, "{b:02x} ").map_err(stdout_err)?;
     }
-    out.write_all(b"\n").map_err(Error::Io)?;
-    out.flush().map_err(Error::Io)
+    out.write_all(b"\n").map_err(stdout_err)?;
+    out.flush().map_err(stdout_err)
 }
 
 fn screenshot_command(conn: &ConnectionArgs, args: ScreenshotArgs) -> Result<()> {
@@ -307,7 +375,7 @@ fn screenshot_command(conn: &ConnectionArgs, args: ScreenshotArgs) -> Result<()>
     };
     screenshot::save(&mut inst, filename.as_deref())?;
     if let Some(f) = &filename {
-        println!("Saved screenshot image to {f}");
+        outln!("Saved screenshot image to {f}");
     }
     Ok(())
 }
@@ -324,7 +392,7 @@ fn waveform_command(conn: &ConnectionArgs, args: WaveformArgs) -> Result<()> {
         Some(path) => {
             let mut f = std::fs::File::create(path).map_err(Error::Io)?;
             write_waveform_csv(&mut f, &wave, &volts).map_err(Error::Io)?;
-            println!("Saved waveform data to {path}");
+            outln!("Saved waveform data to {path}");
         }
     }
     Ok(())
@@ -354,43 +422,46 @@ fn discover_command(conn: &ConnectionArgs, args: DiscoverArgs) -> Result<()> {
     let timeout = conn.timeout.unwrap_or(Duration::from_secs(1));
 
     let Some(address) = &conn.address else {
-        println!("Scanning the USB bus for Micsig instruments...\n");
+        outln!("Scanning the USB bus for Micsig instruments...\n");
         let devices = micsig_rs::usb::list_instruments()?;
         if devices.is_empty() {
-            println!("No USB instruments found");
+            outln!("No USB instruments found");
             return Ok(());
         }
         for d in &devices {
             let name = d.product.as_deref().unwrap_or("Micsig instrument");
-            print!(
+            out!(
                 "  Found \"{name}\" at bus {:03} device {:03} ({:04x}:{:04x})",
-                d.bus, d.address, d.vendor_id, d.product_id
+                d.bus,
+                d.address,
+                d.vendor_id,
+                d.product_id
             );
             match &d.serial {
-                Some(s) => println!(" serial {s}"),
-                None => println!(),
+                Some(s) => outln!(" serial {s}"),
+                None => outln!(),
             }
             if !d.accessible {
-                println!(
+                outln!(
                     "    (cannot be opened: check permissions - on Linux this \
                      usually means a missing udev rule)"
                 );
             }
         }
-        println!("Found {} device{}", devices.len(), plural(devices.len()));
+        outln!("Found {} device{}", devices.len(), plural(devices.len()));
         return Ok(());
     };
 
     let ports = args.ports.clone().unwrap_or_else(|| vec![conn.port]);
-    println!("Probing {address} for instruments - please wait...\n");
+    outln!("Probing {address} for instruments - please wait...\n");
     let devices = discover::scan_ports(address, &ports, timeout);
     if devices.is_empty() {
-        println!("No devices found");
+        outln!("No devices found");
     } else {
         for d in &devices {
-            println!("  Found \"{}\" on address {}", d.id.trim(), d.address);
+            outln!("  Found \"{}\" on address {}", d.id.trim(), d.address);
         }
-        println!("Found {} device{}", devices.len(), plural(devices.len()));
+        outln!("Found {} device{}", devices.len(), plural(devices.len()));
     }
     Ok(())
 }
@@ -457,6 +528,38 @@ mod tests {
         for bad in ["abc", "", "0", "-5", "nan", "inf", "5x"] {
             assert!(parse_timeout(bad).is_err(), "'{bad}' should be rejected");
         }
+    }
+
+    #[test]
+    fn text_responses_lose_their_scpi_terminators() {
+        // A shell capture of `micsig scpi ":CHANnel1:SCALe?"` should be `0.49`.
+        assert_eq!(&*render_response(b"0.49\r\n"), b"0.49\n");
+        assert_eq!(&*render_response(b"0.49"), b"0.49\n");
+        assert_eq!(
+            &*render_response(b"Micsig,MHO14-200N,1,1.0\r\n"),
+            b"Micsig,MHO14-200N,1,1.0\n"
+        );
+        // Only trailing terminators go; internal newlines are content.
+        assert_eq!(&*render_response(b"a\nb\r\n"), b"a\nb\n");
+        // Degenerate cases still produce exactly one newline.
+        assert_eq!(&*render_response(b"\r\n"), b"\n");
+        assert_eq!(&*render_response(b""), b"\n");
+    }
+
+    #[test]
+    fn binary_responses_pass_through_byte_for_byte() {
+        // A JPEG must survive `micsig scpi ":SYS:SCR?" > shot.jpg` unchanged,
+        // including the absence of an appended newline.
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD9];
+        assert_eq!(&*render_response(&jpeg), &jpeg[..]);
+
+        // Trailing 0x0A in binary must not be mistaken for a terminator.
+        let binary = [0x00u8, 0x01, 0x02, 0x0A];
+        assert_eq!(&*render_response(&binary), &binary[..]);
+
+        assert!(!is_text_response(&jpeg));
+        assert!(is_text_response(b"0.49\r\n"));
+        assert!(is_text_response(b""));
     }
 
     #[test]
