@@ -91,6 +91,18 @@ predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
   graticule, but leaves channel enables, `:BUS<n>:TYPE`, `:WAVeform:FORMat`
   and `:TIMebase:MODE` exactly as they were. Do not assume a known state after
   issuing it.
+- **A measurement must be opened before it can be read, and only ten fit.**
+  `:MEASure:PKPK? CH1` answers `Error:SCPI param error!` until the item is
+  added with `:MEASure:OPEN PKPK,CH1`, and for ~200 ms after that it answers
+  `--` rather than a number. The instrument holds **exactly ten** items open
+  at once: opening eleven or twelve leaves the surplus answering `--` however
+  long they are given. `measure` opens in batches of ten and closes each batch
+  afterwards.
+- **The guide misspells the rise-time measurement.** It lists the items as
+  "RISE time" and "FALL time", with a space. `RISE` is rejected;
+  `RISetime` and its short form `RIS` work. `FALL` works as written, so the
+  two are not even consistent with each other. `ACRMS` is documented but only
+  ever answered `--`, and `+RATE`/`-RATE` are rejected outright.
 - **`:WAVeform:STARt`/`:STOP` are accepted but ignored.** Both take a value and
   read it back, but `:WAVeform:DATA?` pages the whole record regardless. The
   automatic paging above is the only way to read past the transfer cap.

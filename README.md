@@ -4,7 +4,7 @@
 
 Command-line tool to interface with a Micsig oscilloscope over SCPI (USB, LAN,
 WiFi). Capture the screen, pull waveforms out as CSV, read the serial bus
-decoder, or just send raw SCPI. Commands are drawn from the vendor's
+decoder, read the built-in measurements, or just send raw SCPI. Commands are drawn from the vendor's
 [SCPI Programming Guide][guide], a copy of which is
 [vendored in this repo](docs/SCPI%20Programming%20Guide-%20Micsig%20Oscilloscope.pdf).
 
@@ -149,6 +149,39 @@ micsig discover -a 10.0.0.5                  # one TCP port
 micsig discover -a 10.0.0.5 --ports 5025,111 # several
 ```
 
+### `measure` — read the instrument's automatic measurements
+
+```
+micsig measure [--channel <1-4>] [--items <a,b,...> | --all] [--csv]
+```
+
+Lets the scope do the arithmetic. With no `--items` it reports a general set;
+`--all` reports all 21 supported. Against the 1 kHz probe-compensation output:
+
+```
+$ micsig measure
+  FREQ      1.0000 kHz
+  PERiod    999.9964 us
+  PKPK      2.0976 V
+  AMP       1.9738 V
+  MAX       2.0491 V
+  MIN       -40.8293 mV
+  MEAN      1.0047 V
+  RMS       1.4069 V
+  PDUTy     49.92 %
+  RISetime  2.7145 us
+  FALL      358.3628 ns
+```
+
+`--csv` emits `item,value,unit` with unscaled values, for piping. An item the
+instrument cannot compute from the current trace shows as `--` rather than
+being an error.
+
+A reading is not a single query: each item has to be added with
+`:MEASure:OPEN`, left ~200 ms to settle, then queried, and the instrument
+holds at most ten open at once. `measure` handles all of that in batches of
+ten and closes what it opened, so the scope is left as it was found.
+
 ### `decode` — read decoded serial bus frames
 
 ```
@@ -199,7 +232,7 @@ is implemented by the MHO series.
 
 ## Testing
 
-`cargo test` runs 39 tests and needs no instrument attached, which is what
+`cargo test` runs 46 tests and needs no instrument attached, which is what
 lets CI run the whole suite on Linux, macOS and Windows. The workflow also
 enforces `rustfmt` and `clippy`, and builds against the 1.88 MSRV.
 

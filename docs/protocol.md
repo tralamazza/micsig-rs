@@ -9,7 +9,13 @@ How `micsig` talks to the instrument, as distinct from
   based on `rust-usbtmc`). It auto-detects the Micsig scope (`18d1:0007`),
   selects the USBTMC interface, and retries the STALL-then-data reads the
   scope performs.
-- Queries are detected by a trailing `?`, matching lxi-tools' behaviour.
+- Queries are detected by a `?` anywhere in the command *header* — the first
+  whitespace-delimited word — not by a trailing `?` as lxi-tools does. The `?`
+  terminates the header in SCPI, so parameterised queries like
+  `:MEASure:PKPK? CH1`, `:BUS1:LEVel? CH1` and `:TRIGger:LIN:DATA? S1` do not
+  end with one. Treating those as commands meant they were sent and their
+  replies never read, leaving the response in the buffer for whatever came
+  next to collect.
 - IEEE 488.2 definite-length blocks (`#<n><length><data>`) are parsed for
   screenshot and waveform payloads, which may contain arbitrary bytes.
   `query_raw` returns the raw wire message including the block header on both

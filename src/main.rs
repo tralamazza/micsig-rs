@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use micsig_rs::benchmark;
 use micsig_rs::decode;
 use micsig_rs::discover;
+use micsig_rs::measure;
 use micsig_rs::screenshot;
 use micsig_rs::transport::{DEFAULT_RAW_PORT, Instrument, Scpi};
 use micsig_rs::usb::UsbInstrument;
@@ -110,6 +111,8 @@ enum Command {
     Benchmark(BenchmarkArgs),
     /// List instruments: USB devices, or a TCP host given --address.
     Discover(DiscoverArgs),
+    /// Read the instrument's automatic measurements for a channel.
+    Measure(MeasureArgs),
     /// Read decoded serial bus frames as CSV.
     Decode(DecodeArgs),
 }
@@ -174,6 +177,25 @@ struct BenchmarkArgs {
     /// Number of requests to send.
     #[arg(short, long, default_value = "100")]
     count: NonZeroUsize,
+}
+
+#[derive(Args)]
+struct MeasureArgs {
+    /// Channel to measure.
+    #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
+    channel: u8,
+
+    /// Measurements to read, comma-separated. Defaults to a general-purpose set.
+    #[arg(short, long, value_enum, num_args = 1.., value_delimiter = ',')]
+    items: Option<Vec<measure::Item>>,
+
+    /// Read every supported measurement.
+    #[arg(long, conflicts_with = "items")]
+    all: bool,
+
+    /// Emit `item,value,unit` CSV instead of an aligned table.
+    #[arg(long)]
+    csv: bool,
 }
 
 #[derive(Args)]
@@ -489,6 +511,50 @@ fn discover_command(conn: &ConnectionArgs, args: DiscoverArgs) -> Result<()> {
     Ok(())
 }
 
+fn measure_command(conn: &ConnectionArgs, args: MeasureArgs) -> Result<()> {
+    let items: Vec<measure::Item> = if args.all {
+        measure::Item::all().to_vec()
+    } else {
+        args.items
+            .unwrap_or_else(|| measure::Item::defaults().to_vec())
+    };
+
+    let mut inst = conn.open(10)?;
+    let results = measure::read(&mut inst, args.channel, &items)?;
+
+    if args.csv {
+        outln!("item,value,unit");
+        for m in &results {
+            match m.value {
+                Some(v) => outln!("{},{v:e},{}", m.item.keyword(), m.item.unit()),
+                None => outln!("{},,{}", m.item.keyword(), m.item.unit()),
+            }
+        }
+        return Ok(());
+    }
+
+    let width = results
+        .iter()
+        .map(|m| m.item.keyword().len())
+        .max()
+        .unwrap_or(0);
+    for m in &results {
+        outln!(
+            "  {:<width$}  {}",
+            m.item.keyword(),
+            measure::format_value(m.item, m.value)
+        );
+    }
+    if results.iter().all(|m| m.value.is_none()) {
+        outln!(
+            "\nNo measurement returned a value. The instrument reports `--` when \
+             it cannot compute one from the current trace - check the signal is \
+             triggered and fills a reasonable part of the screen."
+        );
+    }
+    Ok(())
+}
+
 fn decode_command(conn: &ConnectionArgs, args: DecodeArgs) -> Result<()> {
     let mut inst = conn.open(10)?;
     let raw = decode::read(&mut inst, args.bus)?;
@@ -536,6 +602,7 @@ fn main() {
         Command::Waveform(args) => waveform_command(&conn, args),
         Command::Benchmark(args) => benchmark_command(&conn, args),
         Command::Discover(args) => discover_command(&conn, args),
+        Command::Measure(args) => measure_command(&conn, args),
         Command::Decode(args) => decode_command(&conn, args),
     };
     if let Err(e) = result {

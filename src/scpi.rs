@@ -215,10 +215,20 @@ pub fn parse_preamble(s: &str) -> Result<Preamble> {
     })
 }
 
-/// Return true if a command string is a query (ends in `?`), matching the
-/// behaviour of lxi-tools' `question()` helper.
+/// Return true if a command string is a query.
+///
+/// In SCPI the `?` terminates the *header*, so anything after the first space
+/// is a parameter and the marker need not be the last character. Testing only
+/// for a trailing `?`, as lxi-tools' `question()` helper does, misses every
+/// parameterised query — and there are many, since this instrument takes the
+/// source as an argument: `:MEASure:PKPK? CH1`, `:BUS1:LEVel? CH1`,
+/// `:TRIGger:LIN:DATA? S1`. Those were sent without ever reading the reply,
+/// so the value was silently discarded and the next request read it instead.
 pub fn is_query(command: &str) -> bool {
-    command.trim_end().ends_with('?')
+    command
+        .split_whitespace()
+        .next()
+        .is_some_and(|header| header.contains('?'))
 }
 
 #[cfg(test)]
@@ -273,5 +283,25 @@ mod tests {
         assert!(is_query(":WAVeform:DATA?"));
         assert!(!is_query(":MENU:RUN"));
         assert!(!is_query(":CHANnel1:SCALe 0.5"));
+    }
+
+    /// The `?` ends the header, not the command, so a query that takes its
+    /// source as a parameter still expects a reply. Missing these meant the
+    /// response was left in the buffer for the next request to pick up.
+    #[test]
+    fn detects_parameterised_queries() {
+        for q in [
+            ":MEASure:PKPK? CH1",
+            ":MEASure:DELAy? CH2,CH3,FRISe,FRISe",
+            ":BUS1:LEVel? CH1",
+            ":TRIGger:LIN:DATA? S1",
+            "  :MEASure:FREQ?  CH1  ",
+        ] {
+            assert!(is_query(q), "{q} should be a query");
+        }
+
+        // A `?` in a parameter is not a query marker; only the header counts.
+        assert!(!is_query(":SYSTem:NAME \"why?\""));
+        assert!(!is_query(""));
     }
 }

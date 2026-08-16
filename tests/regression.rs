@@ -359,3 +359,72 @@ fn screenshot_gives_up_after_the_attempt_limit() {
     assert_eq!(scope.calls, 3, "attempt limit not honoured");
     assert!(err.to_string().contains("empty screenshot"), "got: {err}");
 }
+
+/// A scope that refuses to have more than `limit` measurement items open at
+/// once, answering `--` for any beyond it — as an MHO14-200N does past 10.
+struct LimitedMeasure {
+    limit: usize,
+    open: Vec<String>,
+    max_seen: usize,
+}
+
+impl Scpi for LimitedMeasure {
+    fn send(&mut self, command: &str) -> Result<(), micsig_rs::error::Error> {
+        if let Some(rest) = command.strip_prefix(":MEASure:OPEN ") {
+            self.open.push(rest.to_string());
+            self.max_seen = self.max_seen.max(self.open.len());
+        } else if let Some(rest) = command.strip_prefix(":MEASure:CLOSe ") {
+            self.open.retain(|o| o != rest);
+        }
+        Ok(())
+    }
+
+    fn query(&mut self, command: &str) -> Result<String, micsig_rs::error::Error> {
+        if command.starts_with(":CHANnel") {
+            return Ok("1".to_string());
+        }
+        // ":MEASure:<item>? CH1" -> the item's position among the open set
+        let item = command
+            .trim_start_matches(":MEASure:")
+            .split('?')
+            .next()
+            .unwrap()
+            .to_string();
+        let pos = self.open.iter().position(|o| o.starts_with(&item));
+        Ok(match pos {
+            Some(i) if i < self.limit => "1.5".to_string(),
+            _ => "--".to_string(),
+        })
+    }
+
+    fn query_raw(&mut self, _: &str) -> Result<Vec<u8>, micsig_rs::error::Error> {
+        unreachable!("measure only uses query")
+    }
+}
+
+/// The instrument holds at most 10 measurement items open, silently answering
+/// `--` for the rest, so asking for more has to be split into batches.
+#[test]
+fn measure_batches_around_the_open_item_limit() {
+    use micsig_rs::measure::Item;
+    let items = Item::all();
+    assert!(
+        items.len() > 10,
+        "need more than one batch to test batching"
+    );
+
+    let mut scope = LimitedMeasure {
+        limit: 10,
+        open: Vec::new(),
+        max_seen: 0,
+    };
+    let got = micsig_rs::measure::read(&mut scope, 1, items).unwrap();
+
+    assert_eq!(got.len(), items.len());
+    assert!(
+        got.iter().all(|m| m.value == Some(1.5)),
+        "some items exceeded the limit and came back as `--`"
+    );
+    assert!(scope.max_seen <= 10, "opened {} at once", scope.max_seen);
+    assert!(scope.open.is_empty(), "items left open on the instrument");
+}

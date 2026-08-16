@@ -4,6 +4,7 @@ pub mod benchmark;
 pub mod decode;
 pub mod discover;
 pub mod error;
+pub mod measure;
 pub mod scpi;
 pub mod screenshot;
 pub mod transport;
