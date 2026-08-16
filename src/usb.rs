@@ -158,7 +158,8 @@ impl UsbInstrument {
                 Err(_) => continue,
             };
 
-            let Some(out_endpoint) = Self::find_endpoint(&config_desc, TransferType::Bulk, Direction::Out)
+            let Some(out_endpoint) =
+                Self::find_endpoint(&config_desc, TransferType::Bulk, Direction::Out)
             else {
                 continue;
             };
@@ -197,7 +198,9 @@ impl UsbInstrument {
             return Ok(());
         }
 
-        Err(Error::UsbMsg("Micsig instrument not found on USB bus".into()))
+        Err(Error::UsbMsg(
+            "Micsig instrument not found on USB bus".into(),
+        ))
     }
 
     fn write_data(&mut self, data: &[u8]) -> Result<()> {
@@ -257,7 +260,7 @@ impl UsbInstrument {
         let first = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(Error::Timeout(self.timeout.as_secs()));
+                return Err(Error::Timeout(self.timeout));
             }
             match connection.handle.read_bulk(in_ep, &mut buf, remaining) {
                 Ok(n) => break n,
@@ -285,12 +288,26 @@ impl UsbInstrument {
         while message.len() < transfer_size {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(Error::Timeout(self.timeout.as_secs()));
+                return Err(Error::Timeout(self.timeout));
             }
             let want = (transfer_size - message.len()).min(READ_BUFFER_SIZE);
-            match connection.handle.read_bulk(in_ep, &mut buf[..want], remaining) {
-                Ok(0) => break,
-                Ok(n) => message.extend_from_slice(&buf[..n]),
+            // Bulk IN buffers must stay a multiple of the max packet size or
+            // libusb reports Overflow when the device sends a full packet.
+            let want = want.next_multiple_of(512).min(READ_BUFFER_SIZE);
+            match connection
+                .handle
+                .read_bulk(in_ep, &mut buf[..want], remaining)
+            {
+                Ok(0) => {
+                    return Err(Error::BlockLength {
+                        expected: transfer_size,
+                        actual: message.len(),
+                    });
+                }
+                Ok(n) => {
+                    let take = n.min(transfer_size - message.len());
+                    message.extend_from_slice(&buf[..take]);
+                }
                 Err(rusb::Error::Pipe) => {
                     connection.handle.clear_halt(in_ep).ok();
                     std::thread::sleep(Duration::from_millis(10));

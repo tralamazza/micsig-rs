@@ -81,7 +81,7 @@ struct ScreenshotArgs {
     #[arg(short, long, default_value_t = 10)]
     timeout: u64,
 
-    /// Output filename, or `-` for stdout. Defaults to `screenshot_<addr>_<timestamp>.png`.
+    /// Output filename, or `-` for stdout. Defaults to `screenshot_<addr>_<timestamp>.jpg`.
     #[arg(short, long)]
     file: Option<String>,
 }
@@ -108,9 +108,30 @@ struct WaveformArgs {
     #[arg(short, long, default_value_t = 1)]
     channel: u8,
 
+    /// Read mode. `raw` reads full memory depth and needs a stopped scope.
+    #[arg(short = 'm', long, value_enum, default_value_t = ModeArg::Normal)]
+    mode: ModeArg,
+
     /// Output CSV filename, or `-` for stdout.
     #[arg(short, long)]
     file: Option<String>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum ModeArg {
+    Normal,
+    Maximum,
+    Raw,
+}
+
+impl From<ModeArg> for waveform::Mode {
+    fn from(m: ModeArg) -> Self {
+        match m {
+            ModeArg::Normal => waveform::Mode::Normal,
+            ModeArg::Maximum => waveform::Mode::Maximum,
+            ModeArg::Raw => waveform::Mode::Raw,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -185,19 +206,15 @@ fn connect(usb: bool, address: &str, port: u16, timeout: u64) -> Result<AnyTrans
     if usb {
         Ok(AnyTransport::Usb(UsbInstrument::connect(timeout)?))
     } else {
-        Ok(AnyTransport::Tcp(Instrument::connect(address, port, timeout)?))
+        Ok(AnyTransport::Tcp(Instrument::connect(
+            address, port, timeout,
+        )?))
     }
 }
 
 fn scpi_command(args: ScpiArgs) -> Result<()> {
     if args.interactive {
-        return interactive(
-            args.usb,
-            &args.address,
-            args.port,
-            args.timeout,
-            args.hex,
-        );
+        return interactive(args.usb, &args.address, args.port, args.timeout, args.hex);
     }
     let command = args.command.as_deref().unwrap_or_default();
     let mut inst = connect(args.usb, &args.address, args.port, args.timeout)?;
@@ -302,7 +319,7 @@ fn screenshot_command(args: ScreenshotArgs) -> Result<()> {
 
 fn waveform_command(args: WaveformArgs) -> Result<()> {
     let mut inst = connect(args.usb, &args.address, args.port, args.timeout)?;
-    let wave = waveform::capture(&mut inst, args.channel)?;
+    let wave = waveform::capture(&mut inst, args.channel, args.mode.into())?;
     let volts = waveform::samples_to_volts(&wave);
     match args.file.as_deref() {
         Some("-") | None => {
@@ -338,7 +355,10 @@ fn benchmark_command(args: BenchmarkArgs) -> Result<()> {
 }
 
 fn discover_command(args: DiscoverArgs) -> Result<()> {
-    println!("Probing {} for instruments - please wait...\n", args.address);
+    println!(
+        "Probing {} for instruments - please wait...\n",
+        args.address
+    );
     let timeout = Duration::from_secs(args.timeout);
     let devices = discover::scan_ports(&args.address, &args.ports, timeout);
     if devices.is_empty() {
@@ -347,7 +367,11 @@ fn discover_command(args: DiscoverArgs) -> Result<()> {
         for d in &devices {
             println!("  Found \"{}\" on address {}", d.id.trim(), d.address);
         }
-        println!("Found {} device{}", devices.len(), if devices.len() > 1 { "s" } else { "" });
+        println!(
+            "Found {} device{}",
+            devices.len(),
+            if devices.len() > 1 { "s" } else { "" }
+        );
     }
     Ok(())
 }

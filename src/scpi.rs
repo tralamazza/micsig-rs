@@ -8,11 +8,25 @@ use crate::error::{Error, Result};
 /// Read a complete SCPI response from a stream. Handles two cases:
 ///
 /// 1. A plain text response terminated by a newline.
-/// 2. An IEEE 488.2 definite-length block (e.g. `#9000358370<data>`)
-///    optionally followed by a trailing newline.
+/// 2. An IEEE 488.2 definite-length block (e.g. `#9000358370<data>`).
+///
+/// The returned bytes are the raw wire message: for a block response the
+/// `#<n><length>` header is *included*, so that callers can apply the right
+/// interpretation of the length field (see [`unwrap_block`]). Both this and
+/// the USB transport therefore hand back the same shape of data.
+///
+/// A trailing newline after a block is deliberately not consumed here — doing
+/// so costs a full read timeout whenever the instrument does not send one.
+/// Any leftover terminator is skipped at the start of the *next* response.
 pub fn read_response(stream: &mut impl Read, timeout: Duration) -> Result<Vec<u8>> {
+    // Skip terminators left over from a previous response.
     let mut first = [0u8; 1];
-    read_one(stream, &mut first, timeout)?;
+    loop {
+        read_one(stream, &mut first, timeout)?;
+        if first[0] != b'\n' && first[0] != b'\r' {
+            break;
+        }
+    }
 
     if first[0] == b'#' {
         return read_block(stream, timeout);
@@ -30,7 +44,7 @@ pub fn read_response(stream: &mut impl Read, timeout: Duration) -> Result<Vec<u8
                 }
                 buf.push(byte[0]);
             }
-            Err(e) if is_timeout(&e) => return Err(Error::Timeout(timeout.as_secs())),
+            Err(e) if is_timeout(&e) => return Err(Error::Timeout(timeout)),
             Err(e) => return Err(Error::Io(e)),
         }
     }
@@ -41,6 +55,7 @@ pub fn read_response(stream: &mut impl Read, timeout: Duration) -> Result<Vec<u8
 }
 
 /// Read an IEEE 488.2 definite-length block: the `#` has already been consumed.
+/// Returns the full message including the reconstructed header.
 fn read_block(stream: &mut impl Read, timeout: Duration) -> Result<Vec<u8>> {
     // Read the digit-count byte (e.g. the `9` in `#9...`).
     let mut count = [0u8; 1];
@@ -64,16 +79,19 @@ fn read_block(stream: &mut impl Read, timeout: Duration) -> Result<Vec<u8>> {
     let mut payload = vec![0u8; length];
     read_exact_or_timeout(stream, &mut payload, timeout)?;
 
-    // Consume an optional trailing newline.
-    consume_optional_newline(stream)?;
-
-    Ok(payload)
+    let mut message = Vec::with_capacity(2 + digits + length);
+    message.push(b'#');
+    message.push(count[0]);
+    message.extend_from_slice(&length_buf);
+    message.extend_from_slice(&payload);
+    Ok(message)
 }
 
 fn read_one(stream: &mut impl Read, out: &mut [u8; 1], timeout: Duration) -> Result<()> {
     match stream.read(out) {
-        Ok(0) | Ok(_) => Ok(()),
-        Err(e) if is_timeout(&e) => Err(Error::Timeout(timeout.as_secs())),
+        Ok(0) => Err(Error::Eof),
+        Ok(_) => Ok(()),
+        Err(e) if is_timeout(&e) => Err(Error::Timeout(timeout)),
         Err(e) => Err(Error::Io(e)),
     }
 }
@@ -93,20 +111,11 @@ fn read_exact_or_timeout(stream: &mut impl Read, out: &mut [u8], timeout: Durati
                 });
             }
             Ok(n) => filled += n,
-            Err(e) if is_timeout(&e) => return Err(Error::Timeout(timeout.as_secs())),
+            Err(e) if is_timeout(&e) => return Err(Error::Timeout(timeout)),
             Err(e) => return Err(Error::Io(e)),
         }
     }
     Ok(())
-}
-
-fn consume_optional_newline(stream: &mut impl Read) -> Result<()> {
-    let mut byte = [0u8; 1];
-    match stream.read(&mut byte) {
-        Ok(0) | Ok(_) => Ok(()),
-        Err(e) if is_timeout(&e) => Ok(()),
-        Err(e) => Err(Error::Io(e)),
-    }
 }
 
 /// Parse an IEEE 488.2 definite-length block header of the form `#<n><length>`
@@ -137,19 +146,31 @@ pub fn parse_block_header(header: &[u8]) -> Result<(usize, usize)> {
     Ok((length, length_end))
 }
 
-/// Strip an IEEE 488.2 definite-length block header from a payload if present
-/// (Micsig wraps binary payloads like screenshots and waveform data in one).
-/// Plain text responses pass through unchanged.
-pub fn unwrap_block(data: &[u8]) -> Vec<u8> {
+/// Split a block response into its declared length field and everything that
+/// follows the header. Returns `None` if `data` is not a block.
+///
+/// Note that the meaning of the length field is *command dependent* on Micsig
+/// firmware, so this function deliberately does not interpret it:
+///
+/// - `:SYS:SCR?` reports a byte count.
+/// - `:WAVeform:DATA?` reports a **sample** count; the payload is four ASCII
+///   hex characters per sample, so it is four times longer than the field
+///   suggests (measured on an MHO14-200N, firmware 1.97.70).
+pub fn block_parts(data: &[u8]) -> Option<(usize, &[u8])> {
     if data.first() != Some(&b'#') {
-        return data.to_vec();
+        return None;
     }
-    match parse_block_header(data) {
-        Ok((length, header_len)) => {
-            let end = (header_len + length).min(data.len());
-            data[header_len..end].to_vec()
-        }
-        Err(_) => data.to_vec(),
+    let (declared, header_len) = parse_block_header(data).ok()?;
+    Some((declared, &data[header_len..]))
+}
+
+/// Strip an IEEE 488.2 definite-length block header, treating the length field
+/// as a byte count. Correct for `:SYS:SCR?`; see [`block_parts`] for why it is
+/// *not* correct for `:WAVeform:DATA?`. Plain text passes through unchanged.
+pub fn unwrap_block(data: &[u8]) -> Vec<u8> {
+    match block_parts(data) {
+        Some((length, payload)) => payload[..length.min(payload.len())].to_vec(),
+        None => data.to_vec(),
     }
 }
 

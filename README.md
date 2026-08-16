@@ -46,12 +46,16 @@ the manual calling it PNG). Without `--file`, the image is saved to
 ### `waveform` — capture channel data
 
 ```
-micsig waveform [options] [--channel <1-4>] [--file <name>]
+micsig waveform [options] [--channel <1-4>] [--mode <normal|maximum|raw>] [--file <name>]
 ```
 
-Reads `:WAVeform:DATA?`, decodes the 16-bit samples (binary or ASCII-hex,
+Sets `:WAVeform:SOURce`, `:WAVeform:MODE` and `:WAVeform:FORMat`, reads
+`:WAVeform:DATA?`, decodes the 16-bit samples (binary or ASCII-hex,
 auto-detected), and scales them to volts using `:WAVeform:PREamble?`. Emits CSV
 (`sample,time_s,voltage_v`).
+
+`--mode raw` reads the full memory depth and is only valid while the scope is
+stopped (`micsig scpi ":MENU:STOP"`).
 
 ### `benchmark` — measure request latency
 
@@ -80,8 +84,62 @@ Probes ports and reports any responding instrument.
 - Queries are detected by a trailing `?`, matching lxi-tools' behaviour.
 - IEEE 488.2 definite-length blocks (`#<n><length><data>`) are parsed for
   screenshot and waveform payloads, which may contain arbitrary bytes.
+  `query_raw` returns the raw wire message including the block header on both
+  transports; callers interpret the length field themselves (see below).
+
+## Firmware quirks
+
+Verified against an MHO14-200N running firmware 1.97.70:
+
+- **The block length field is not always a byte count.** `:SYS:SCR?` reports
+  bytes, but `:WAVeform:DATA?` reports a *sample* count and puts four ASCII hex
+  characters on the wire per sample — the payload is 4x longer than the header
+  says. Treating it as bytes silently truncates the trace to a quarter.
+- **`:WAVeform:MODE` is mandatory.** Omit it and `:WAVeform:DATA?` returns an
+  empty block (`#900000000`) every time, regardless of source and format.
+- **`:WAVeform:FORMat WORD` still returns ASCII hex.** The preamble's `format`
+  field reads 0 and `:WAVeform:FORMat?` answers `WORD`, so the wire format is
+  sniffed rather than trusted.
+- **Screenshots have a corrupt JFIF marker.** `:SYS:SCR?` emits `FF D8 58 00`
+  where JPEG requires `FF D8 FF E0`; the rest of the file is a valid baseline
+  JPEG. `screenshot` repairs those two bytes, otherwise no viewer opens it.
+- Transfers cap at ~250 KB per `:WAVeform:DATA?`, so deep captures need
+  `:WAVeform:STARt`/`:STOP` paging (not yet implemented).
+
+### Known limitation: `waveform` over TCP is unverified
+
+USBTMC frames each response with its own length, so the sample-count quirk
+above is harmless there. Raw TCP has no such framing: `read_block` reads
+exactly `<length>` bytes, which for `:WAVeform:DATA?` is the sample count, so
+it will under-read by 4x and leave the rest in the socket, desyncing the
+connection. Everything else (`scpi`, `screenshot`, `benchmark`, `discover`)
+is transport-agnostic and fine. Fixing this properly needs command-aware
+framing; it is untested because the unit on hand was only reachable over USB.
 
 ## Testing
 
 `cargo test` covers block-header parsing, preamble parsing, sample decoding,
 and screenshot/benchmark round-trips against an in-process mock instrument.
+`tests/regression.rs` pins the transport edge cases: EOF mid-response, a block
+with no trailing terminator, hostname resolution in `discover`, the waveform
+sample-count length field, and the JFIF marker repair.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+`src/usb.rs` is derived from [`rust-usbtmc`](https://github.com/rogerioadris/rust-usbtmc)
+(c) Rogério Adriano, also dual-licensed MIT OR Apache-2.0.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

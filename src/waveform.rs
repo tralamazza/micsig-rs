@@ -22,6 +22,27 @@ impl Format {
     }
 }
 
+/// Modes understood by `:WAVeform:MODE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Points as displayed on screen.
+    Normal,
+    /// Maximum valid points in the current run/stop state.
+    Maximum,
+    /// Full memory depth; only valid while the scope is stopped.
+    Raw,
+}
+
+impl Mode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Normal => "NORMal",
+            Mode::Maximum => "MAXimum",
+            Mode::Raw => "RAW",
+        }
+    }
+}
+
 /// A captured waveform: raw samples plus the scaling preamble.
 #[derive(Debug, Clone)]
 pub struct Waveform {
@@ -39,6 +60,13 @@ pub fn set_format(inst: &mut impl Scpi, format: Format) -> Result<()> {
     inst.send(&format!(":WAVeform:FORMat {}", format.as_str()))
 }
 
+/// Set the waveform read mode. This is not optional: with no `:WAVeform:MODE`
+/// in the setup sequence an MHO14-200N answers `:WAVeform:DATA?` with an
+/// empty block (`#900000000`) every time.
+pub fn set_mode(inst: &mut impl Scpi, mode: Mode) -> Result<()> {
+    inst.send(&format!(":WAVeform:MODE {}", mode.as_str()))
+}
+
 /// Read the preamble for the currently selected source.
 pub fn preamble(inst: &mut impl Scpi) -> Result<Preamble> {
     let resp = inst.query(":WAVeform:PREamble?")?;
@@ -46,19 +74,57 @@ pub fn preamble(inst: &mut impl Scpi) -> Result<Preamble> {
 }
 
 /// Capture the waveform for a channel and decode it into signed samples.
-pub fn capture(inst: &mut impl Scpi, channel: u8) -> Result<Waveform> {
+///
+/// Verified over USBTMC. Over raw TCP the block framing under-reads this
+/// response by 4x because the length field counts samples, not bytes — see
+/// the "Known limitation" section in the README.
+pub fn capture(inst: &mut impl Scpi, channel: u8, mode: Mode) -> Result<Waveform> {
     set_source(inst, channel)?;
+    set_mode(inst, mode)?;
     set_format(inst, Format::Word)?;
     let preamble = preamble(inst)?;
     let raw = inst.query_raw(":WAVeform:DATA?")?;
-    let raw = scpi::unwrap_block(&raw);
-    let samples = decode_samples(&raw);
+    let samples = decode_data_block(&raw);
     Ok(Waveform { preamble, samples })
 }
 
-/// Decode waveform samples, auto-detecting the wire format. Some Micsig
-/// scopes return 16-bit little-endian words, others return 4-character ASCII
-/// hex per sample (`0002FFFF...`).
+/// Decode a `:WAVeform:DATA?` response.
+///
+/// The block header's length field is a **sample** count here, not a byte
+/// count, so the payload must be taken to the end of the message rather than
+/// truncated at `declared` bytes — doing the latter drops three quarters of
+/// the trace. The declared count is used only to trim any trailing
+/// terminators the firmware appends (`\r\n\r\n` on an MHO14-200N).
+pub fn decode_data_block(raw: &[u8]) -> Vec<i16> {
+    let (declared, payload) = match scpi::block_parts(raw) {
+        Some((declared, payload)) => (Some(declared), payload),
+        None => (None, raw),
+    };
+
+    // Trim the terminators and USB alignment padding that follow the payload;
+    // a stray NUL would otherwise defeat the ASCII-hex sniff below.
+    let end = payload
+        .iter()
+        .rposition(|b| !matches!(b, b'\r' | b'\n' | b'\0'))
+        .map_or(0, |i| i + 1);
+    let mut samples = decode_samples(&payload[..end]);
+
+    if let Some(n) = declared
+        && n > 0
+        && samples.len() > n
+    {
+        samples.truncate(n);
+    }
+    samples
+}
+
+/// Decode waveform samples, auto-detecting the wire format.
+///
+/// The format must be sniffed rather than read from the preamble: an
+/// MHO14-200N reports `format` 0 in its preamble and answers
+/// `:WAVeform:FORMat?` with `WORD`, yet still puts four ASCII hex characters
+/// on the wire per sample. Other units are documented to send 16-bit
+/// little-endian words, so both are handled.
 pub fn decode_samples(raw: &[u8]) -> Vec<i16> {
     if is_ascii_hex(raw) {
         decode_ascii_hex(raw)
@@ -68,19 +134,33 @@ pub fn decode_samples(raw: &[u8]) -> Vec<i16> {
 }
 
 fn is_ascii_hex(raw: &[u8]) -> bool {
+    // Requiring a whole number of 4-character groups keeps short binary
+    // payloads that happen to be all hex digits from being misread as text.
+    let significant = raw
+        .iter()
+        .filter(|b| !b.is_ascii_whitespace() && **b != b',')
+        .count();
     !raw.is_empty()
+        && significant % 4 == 0
         && raw
             .iter()
             .all(|b| b.is_ascii_hexdigit() || b.is_ascii_whitespace() || *b == b',')
 }
 
-/// Decode 4-character little-endian ASCII hex groups into signed samples.
-/// Groups may be separated by commas or whitespace, or run together in a
-/// continuous hex string.
+/// Decode 4-character big-endian ASCII hex groups into signed samples, e.g.
+/// `"FFFF0003"` -> `[-1, 3]`. Groups may be separated by commas or whitespace,
+/// or run together in a continuous hex string. A trailing partial group is
+/// discarded rather than decoded as a short sample.
 pub fn decode_ascii_hex(raw: &[u8]) -> Vec<i16> {
     let text: String = raw
         .iter()
-        .map(|&b| if b.is_ascii_whitespace() || b == b',' { ' ' } else { b as char })
+        .map(|&b| {
+            if b.is_ascii_whitespace() || b == b',' {
+                ' '
+            } else {
+                b as char
+            }
+        })
         .collect();
     text.split_whitespace()
         .flat_map(|tok| {
@@ -88,6 +168,7 @@ pub fn decode_ascii_hex(raw: &[u8]) -> Vec<i16> {
             // Split continuous hex into 4-character sample groups.
             tok.as_bytes()
                 .chunks(4)
+                .filter(|c| c.len() == 4)
                 .map(|c| std::str::from_utf8(c).unwrap_or(""))
                 .collect::<Vec<_>>()
         })

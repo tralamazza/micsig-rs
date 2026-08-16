@@ -6,7 +6,27 @@ use crate::transport::Scpi;
 /// Capture the current screen image bytes.
 pub fn capture(inst: &mut impl Scpi) -> Result<Vec<u8>> {
     let raw = inst.query_raw(":SYS:SCR?")?;
-    Ok(crate::scpi::unwrap_block(&raw))
+    let mut image = crate::scpi::unwrap_block(&raw);
+    repair_jfif_marker(&mut image);
+    Ok(image)
+}
+
+/// Repair the APP0 marker in a Micsig screenshot.
+///
+/// An MHO14-200N (firmware 1.97.70) emits `FF D8 58 00` where JFIF requires
+/// `FF D8 FF E0`; every other byte of the image is a well-formed JPEG, so the
+/// two-byte fix yields a file that decoders accept. Without it `:SYS:SCR?`
+/// output is rejected by every image viewer.
+///
+/// The patch is deliberately narrow: it only fires on the exact malformed
+/// signature, followed by the `00 10 4A 46 49 46` ("JFIF" segment) that a
+/// correct APP0 would carry.
+pub fn repair_jfif_marker(image: &mut [u8]) {
+    const BROKEN: &[u8] = &[0xFF, 0xD8, 0x58, 0x00, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46];
+    if image.len() >= BROKEN.len() && image[..BROKEN.len()] == *BROKEN {
+        image[2] = 0xFF;
+        image[3] = 0xE0;
+    }
 }
 
 /// Capture and write the screen image to a file. If `filename` is `None` or
@@ -16,7 +36,9 @@ pub fn save(inst: &mut impl Scpi, filename: Option<&str>) -> Result<()> {
     match filename {
         None | Some("-") => {
             use std::io::Write;
-            std::io::stdout().write_all(&image).map_err(crate::error::Error::Io)?;
+            std::io::stdout()
+                .write_all(&image)
+                .map_err(crate::error::Error::Io)?;
         }
         Some(path) => std::fs::write(path, &image).map_err(crate::error::Error::Io)?,
     }

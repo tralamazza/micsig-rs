@@ -3,6 +3,17 @@ name = "micsig-rs"
 version = "0.1.0"
 edition = "2024"
 description = "Command-line tool to interface with a Micsig oscilloscope over SCPI"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tralamazza/micsig-rs"
+keywords = ["scpi", "oscilloscope", "micsig", "usbtmc", "lxi"]
+categories = ["command-line-utilities", "science"]
+# The programming guide is Micsig's copyright, not ours, so it stays out of the
+# published crate; .claude is local tooling.
+exclude = [".claude", "doc/*.pdf"]
+
+[[bin]]
+name = "micsig"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
