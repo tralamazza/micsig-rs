@@ -4,8 +4,8 @@
 
 Command-line tool to interface with a Micsig oscilloscope over SCPI (USB, LAN,
 WiFi). Capture the screen, pull waveforms out as CSV, read the serial bus
-decoder, read the built-in measurements, or just send raw SCPI. Commands are drawn from the vendor's
-[SCPI Programming Guide][guide], a copy of which is
+decoder and the built-in measurements, or just send raw SCPI. Commands are
+drawn from the vendor's [SCPI Programming Guide][guide], a copy of which is
 [vendored in this repo](docs/SCPI%20Programming%20Guide-%20Micsig%20Oscilloscope.pdf).
 
 [guide]: https://www.micsig.com/uploads/20260806/1cf4f626caf3eecee6cee1145a80762f.pdf
