@@ -129,15 +129,21 @@ only viewable because the tool repairs the firmware's broken JFIF marker; see
 micsig waveform [--channel <1-4>] [--mode <normal|maximum|raw>] [--file <name>]
 ```
 
-Sets `:WAVeform:SOURce`, `:WAVeform:MODE` and `:WAVeform:FORMat`, reads
-`:WAVeform:DATA?`, decodes the 16-bit samples (binary or ASCII-hex,
-auto-detected), and scales them to volts using `:WAVeform:PREamble?`. Emits CSV
+Sets `:WAVeform:SOURce` and `:WAVeform:FORMat`, reads `:WAVeform:PREamble?`,
+then writes `:WAVeform:MODE` and reads `:WAVeform:DATA?` repeatedly until the
+instrument returns an empty block. Samples (binary or ASCII-hex, auto-detected)
+are scaled to volts from the preamble and emitted as CSV
 (`sample,time_s,voltage_v`) to stdout, or to `--file`.
 
-The manual says `--mode raw` reads full memory depth and requires a stopped
-scope (`micsig scpi ":MENU:STOP"`). Neither held in testing: it returned data
-while running, and all three modes returned the same 62500 samples, because the
-per-transfer cap below bites long before the 2.2 M memory depth does.
+The repeated read matters: each response is capped at 62500 samples, and the
+next call continues from where the last stopped. A single read therefore
+returns only part of the record — 62500 of 110000 in `normal` mode. Writing
+`:WAVeform:MODE` rewinds that cursor, which is why it is sent last.
+
+The manual says `--mode raw` requires a stopped scope; it returned data while
+running too. What `raw` does change is the length: with the scope stopped at
+1 ms/div (`:ACQuire:DEPTh?` = 11 M) it yielded all 11,000,000 samples in 181 s
+and a 426 MB CSV, against 110,000 for `normal`. Ask for `raw` deliberately.
 
 ### `benchmark` — measure request latency
 
@@ -209,27 +215,42 @@ is implemented by the MHO series.
 
 ## Firmware quirks
 
-Verified against an MHO14-200N reporting firmware 1.97.70 (that string is
-itself unreliable — see the `*IDN?` entry below):
+Verified against an MHO14-200N, first on firmware 1.97.70 and re-checked
+end-to-end on 1.143.72 (that version string is itself unreliable — see the
+`*IDN?` entry below). Entries are marked where the two firmwares differ.
 
 - **The block length field is not always a byte count.** `:SYS:SCR?` reports
   bytes, but `:WAVeform:DATA?` reports a *sample* count and puts four ASCII hex
   characters on the wire per sample — the payload is 4x longer than the header
-  says. Treating it as bytes silently truncates the trace to a quarter.
-- **`:WAVeform:MODE` is mandatory.** Omit it and `:WAVeform:DATA?` returns an
-  empty block (`#900000000`) every time, regardless of source and format.
+  says. Treating it as bytes silently truncates the trace to a quarter. The
+  ratio was exactly 4.0 on every read measured.
+- **`:WAVeform:DATA?` is a paged read, not a snapshot.** Each response carries
+  at most 62500 samples and the next call resumes where it stopped, ending with
+  an empty block (`#900000000`). On 1.143.72 a 110000-sample `NORMal` record
+  arrives as 62500 + 47500 + empty, and those three payloads concatenate
+  byte-for-byte into what the single-shot `:WAVeform:DATA:HEX?` returns. Read
+  once and you get 57% of the trace with nothing to indicate it.
+- **`:WAVeform:MODE` rewinds the read cursor.** Nothing else does —
+  `:WAVeform:SOURce` and `:WAVeform:FORMat` writes leave it where it was, so a
+  read that follows them returns the *next* page rather than the first. On
+  1.97.70 this looked like "`:WAVeform:MODE` is mandatory", because without it
+  the cursor was usually already exhausted and every read came back empty.
+  `capture` sends it last, after the source, format and preamble.
 - **`:WAVeform:FORMat WORD` still returns ASCII hex.** The preamble's `format`
   field reads 0 and `:WAVeform:FORMat?` answers `WORD`, so the wire format is
   sniffed rather than trusted.
 - **Screenshots have a corrupt JFIF marker.** `:SYS:SCR?` puts garbage where
   JPEG requires the `FF E0` APP0 marker — `58 00` in most captures, `D8 00` in
-  at least one, so the bad value is not even stable. The rest of the file is a
-  valid baseline JPEG. `screenshot` rewrites those two bytes, anchoring on the
-  surrounding SOI and `00 10 "JFIF"` rather than on the corrupt value;
-  otherwise no viewer opens the file.
+  at least one, so the bad value is not even stable (1.143.72 gave `58 00` in
+  24 of 24). The rest of the file is a valid baseline JPEG. `screenshot`
+  rewrites those two bytes, anchoring on the surrounding SOI and `00 10 "JFIF"`
+  rather than on the corrupt value; otherwise no viewer opens the file.
 - **Back-to-back `:SYS:SCR?` returns an empty block.** Issued again before the
-  previous capture finishes, the scope answers `#900000000`. `screenshot`
-  treats that as an error rather than writing a zero-byte file.
+  previous capture finishes, the scope answers `#900000000` — on 1.143.72 the
+  five captures following a successful one were all empty, so this is not
+  limited to the immediate next request. `screenshot` treats an empty block as
+  an error rather than writing a zero-byte file; allow roughly a second
+  between captures.
 - **A disabled channel returns another channel's data.** `:WAVeform:DATA?` for
   a channel that is switched off does not error or return an empty block — it
   returns stale samples from whichever channel was last acquired. With only
@@ -242,19 +263,38 @@ itself unreliable — see the `*IDN?` entry below):
 - **`:WAVeform:FORMat ASCii` returns volts, not samples** — comma-separated
   scientific notation (`1.148325e-02,...`), already scaled. It does not fit the
   sample-plus-preamble model, so only `WORD` and `BYTE` are offered.
-- **`*IDN?` reports a different firmware version depending on the UI mode.**
-  In the normal YT view this unit answers `Micsig,MHO14-200N,410000676,1.97.70`;
-  put it into the serial-decode text view with `:BUS<n>:MODE TXT` and the same
-  query answers `...,1.97.8`. Reproduced 100% across repeated switches. Do not
-  parse the firmware field expecting it to be stable.
-- **`:BUS<n>:MODE TXT` takes over the screen and stops waveform capture.** It
-  switches the instrument into a full-screen decode view ("Please open the
-  channel first!"), after which `:WAVeform:DATA?` returns an empty block in
-  every mode. `:BUS<n>:MODE GRAP` restores it. Configuring a bus also switches
-  `:TRIGger:TYPE` to the bus trigger (`S1:UART Start Bit`), which has to be set
-  back to `EDGE` by hand.
-- Transfers cap at ~250 KB per `:WAVeform:DATA?`, so deep captures need
-  `:WAVeform:STARt`/`:STOP` paging (not yet implemented).
+- **`*IDN?` reports an unstable firmware version.** On 1.97.70 the field
+  alternated between `1.97.70` and `1.97.8`; on 1.143.72 it alternates between
+  `1.143.72` and `1.143.9`. It holds one value for dozens of consecutive
+  queries and then flips. The 1.97.70 notes tied this to `:BUS<n>:MODE TXT`,
+  but on 1.143.72 it flipped without any correlated command. Do not parse the
+  firmware field expecting it to be stable.
+- **Keyword abbreviation is inconsistent per command.** The firmware does not
+  implement the SCPI long/short-form rule; each command accepts its own fixed
+  spellings. `:CHANnel1:COUPling?` errors while `:CHAN1:COUP?` returns `DC`,
+  and `:ACQuire:DEPTh?` works while `:ACQ:DEPT?` errors. Neither form is
+  universally safe — try both before concluding a command is unsupported.
+- **`:WAVeform:STARt`/`:STOP` are accepted but ignored.** Both take a value and
+  read it back, but `:WAVeform:DATA?` pages the whole record regardless. The
+  automatic paging above is the only way to read past the transfer cap.
+- **The display lags SCPI writes by roughly 0.15–0.5 s**, and longer after a
+  write that re-arms acquisition (a timebase change). A screenshot taken
+  immediately after a settings write can show the previous state.
+- **Fixed on 1.143.72:** `:BUS<n>:MODE TXT` no longer takes over the screen or
+  stops waveform capture. On 1.97.70 it switched the instrument into a
+  full-screen decode view ("Please open the channel first!"), after which
+  `:WAVeform:DATA?` returned an empty block in every mode. Configuring a bus
+  still switches `:TRIGger:TYPE` to the bus trigger (`S1:UART Start Bit`),
+  which has to be set back to `EDGE` by hand.
+- **Undocumented but working: `:WAVeform:DATA:HEX?`, `:BIN?` and `:ASCii?`.**
+  Each returns the whole `NORMal` record in one response — 110000 samples in
+  ~0.05 s — where `:WAVeform:DATA?` needs three reads. `HEX?` is four ASCII hex
+  characters per sample, `BIN?` is 4-byte little-endian signed integers, and
+  `ASCii?` is volts in scientific notation. All three declare a sample count,
+  not a byte count. They return an empty block in `MAXimum` and `RAW` modes, so
+  `capture` uses the paged `:WAVeform:DATA?` instead, which works in all three.
+- Transfers cap at ~250 KB per `:WAVeform:DATA?` (62500 samples, or ~18000 in
+  `ASCii` format). `capture` pages around it.
 
 ### Known limitation: `waveform` over TCP is unverified
 
@@ -262,13 +302,15 @@ USBTMC frames each response with its own length, so the sample-count quirk
 above is harmless there. Raw TCP has no such framing: `read_block` reads
 exactly `<length>` bytes, which for `:WAVeform:DATA?` is the sample count, so
 it will under-read by 4x and leave the rest in the socket, desyncing the
-connection. Everything else (`scpi`, `screenshot`, `benchmark`, `discover`)
-is transport-agnostic and fine. Fixing this properly needs command-aware
-framing; it is untested because the unit on hand was only reachable over USB.
+connection. The paging loop makes this worse rather than better, since each of
+the several reads leaves three quarters of a page behind. Everything else
+(`scpi`, `screenshot`, `benchmark`, `discover`) is transport-agnostic and fine.
+Fixing this properly needs command-aware framing; it is untested because the
+unit on hand was only reachable over USB.
 
 ## Testing
 
-`cargo test` runs 34 tests and needs no instrument attached.
+`cargo test` runs 37 tests and needs no instrument attached.
 
 Unit tests cover block-header and preamble parsing, sample decoding, USBTMC
 header packing, timeout parsing, decode-record conversion, and the clap
@@ -280,7 +322,10 @@ way, each against a scripted mock socket or a captured payload: EOF
 mid-response, a block with no trailing terminator, hostname resolution in
 `discover`, the sample-count length field, the JFIF marker repair across
 several corrupt values, ASCii-volts detection, and text-versus-binary stdout
-rendering.
+rendering. A scripted `FakeScope` covers the `:WAVeform:DATA?` paging: that
+every page is drained, that `:WAVeform:MODE` is written after the rest of the
+setup so the cursor starts at the beginning, and that a record which never
+terminates is reported rather than silently truncated.
 
 ## License
 

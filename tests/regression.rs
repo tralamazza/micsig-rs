@@ -165,3 +165,139 @@ fn ascii_volts_payload_is_recognised() {
     }
     assert!(!micsig_rs::waveform::looks_like_ascii_volts(b""));
 }
+
+/// A scripted stand-in for an instrument, so `capture` can be exercised
+/// without hardware. Queries are answered from `replies`, keyed by the
+/// command; `:WAVeform:DATA?` pops one page per call.
+struct FakeScope {
+    pages: Vec<Vec<u8>>,
+    page: usize,
+    log: Vec<String>,
+}
+
+impl FakeScope {
+    /// Build a scope holding `counts` pages of ASCII-hex samples, followed by
+    /// the empty block a real MHO14-200N sends to mark the end of the record.
+    fn with_pages(counts: &[usize]) -> Self {
+        let mut pages: Vec<Vec<u8>> = counts
+            .iter()
+            .map(|&n| {
+                let mut block = format!("#9{n:09}").into_bytes();
+                // Distinct, in-range sample values so pages can be told apart.
+                for i in 0..n {
+                    block.extend_from_slice(format!("{:04X}", (i % 0x7FFF) as u16).as_bytes());
+                }
+                block.push(b'\n');
+                block
+            })
+            .collect();
+        pages.push(b"#9000000000\n".to_vec());
+        FakeScope {
+            pages,
+            page: 0,
+            log: Vec::new(),
+        }
+    }
+}
+
+impl Scpi for FakeScope {
+    fn send(&mut self, command: &str) -> Result<(), micsig_rs::error::Error> {
+        self.log.push(command.to_string());
+        // Writing the mode rewinds the read cursor, as the firmware does.
+        if command.starts_with(":WAVeform:MODE") {
+            self.page = 0;
+        }
+        Ok(())
+    }
+
+    fn query(&mut self, command: &str) -> Result<String, micsig_rs::error::Error> {
+        self.log.push(command.to_string());
+        Ok(match command {
+            c if c.starts_with(":CHANnel") => "1".to_string(),
+            ":WAVeform:PREamble?" => "0,0,1,1.0E-9,0.0,0.0,1.0,0.0,0.0".to_string(),
+            _ => "0".to_string(),
+        })
+    }
+
+    fn query_raw(&mut self, command: &str) -> Result<Vec<u8>, micsig_rs::error::Error> {
+        self.log.push(command.to_string());
+        let out = self.pages.get(self.page).cloned().unwrap_or_default();
+        self.page += 1;
+        Ok(out)
+    }
+}
+
+/// `:WAVeform:DATA?` caps each response at 62500 samples and continues from
+/// there on the next call, so a single read returns a fraction of the record.
+/// Measured on an MHO14-200N (firmware 1.143.72): a 110000-sample `NORMal`
+/// record arrives as 62500 + 47500 + an empty block.
+#[test]
+fn waveform_capture_drains_every_page() {
+    let mut scope = FakeScope::with_pages(&[62500, 47500]);
+    let wave = micsig_rs::waveform::capture(&mut scope, 1, micsig_rs::waveform::Mode::Normal)
+        .expect("capture should succeed");
+    assert_eq!(
+        wave.samples.len(),
+        110000,
+        "capture stopped at the first page"
+    );
+
+    // The second page must follow the first, not overwrite it.
+    assert_eq!(wave.samples[0], 0x0000);
+    assert_eq!(wave.samples[62499], ((62499 % 0x7FFF) as u16) as i16);
+    assert_eq!(wave.samples[62500], 0x0000);
+
+    let reads = scope.log.iter().filter(|c| *c == ":WAVeform:DATA?").count();
+    assert_eq!(reads, 3, "should read until the empty terminating block");
+}
+
+/// The mode write rewinds the page cursor, so it has to be the last thing sent
+/// before the first read; ordering it earlier loses the front of the record.
+#[test]
+fn waveform_capture_sets_mode_after_the_other_setup() {
+    let mut scope = FakeScope::with_pages(&[10]);
+    micsig_rs::waveform::capture(&mut scope, 1, micsig_rs::waveform::Mode::Raw).unwrap();
+
+    let mode = scope
+        .log
+        .iter()
+        .position(|c| c.starts_with(":WAVeform:MODE"))
+        .unwrap();
+    let first_read = scope
+        .log
+        .iter()
+        .position(|c| c == ":WAVeform:DATA?")
+        .unwrap();
+    for other in [
+        ":WAVeform:SOURce",
+        ":WAVeform:FORMat",
+        ":WAVeform:PREamble?",
+    ] {
+        let at = scope.log.iter().position(|c| c.starts_with(other)).unwrap();
+        assert!(at < mode, "{other} must be sent before :WAVeform:MODE");
+    }
+    assert!(mode < first_read);
+}
+
+/// A record that never terminates must be reported, not quietly truncated.
+#[test]
+fn waveform_capture_refuses_an_endless_record() {
+    let mut scope = FakeScope {
+        pages: Vec::new(),
+        page: 0,
+        log: Vec::new(),
+    };
+    scope.pages = (0..500)
+        .map(|_| {
+            let mut b = format!("#9{:09}", 4).into_bytes();
+            b.extend_from_slice(b"0001000200030004\n");
+            b
+        })
+        .collect();
+    let err = micsig_rs::waveform::capture(&mut scope, 1, micsig_rs::waveform::Mode::Normal)
+        .expect_err("should refuse a record with no terminating empty block");
+    assert!(
+        err.to_string().contains("truncated"),
+        "unexpected error: {err}"
+    );
+}

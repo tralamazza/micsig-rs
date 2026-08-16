@@ -105,26 +105,66 @@ pub fn ensure_channel_enabled(inst: &mut impl Scpi, channel: u8) -> Result<()> {
     Ok(())
 }
 
+/// Upper bound on the number of `:WAVeform:DATA?` reads [`capture`] will make.
+///
+/// Each read returns at most 62500 samples, so this allows a little over 12 M
+/// — one page past the deepest record an MHO14-200N offers (`:ACQuire:DEPTh?`
+/// tops out at 11 M). It exists only so that a firmware that never returns the
+/// terminating empty block cannot loop forever.
+const MAX_PAGES: usize = 200;
+
 /// Capture the waveform for a channel and decode it into signed samples.
 ///
-/// Verified over USBTMC. Over raw TCP the block framing under-reads this
-/// response by 4x because the length field counts samples, not bytes — see
-/// the "Known limitation" section in the README.
+/// `:WAVeform:DATA?` caps each response at ~250 KB (62500 samples), so a
+/// single read returns only the first page of the record. Successive reads
+/// continue where the previous one stopped and the instrument signals the end
+/// with an empty block, which is what the loop below drains. Writing
+/// `:WAVeform:MODE` rewinds that cursor, so [`set_mode`] must come first.
+///
+/// Verified on an MHO14-200N (firmware 1.143.72): in `NORMal` mode the three
+/// pages of a 110000-sample record concatenate byte-for-byte into the payload
+/// that the single-shot `:WAVeform:DATA:HEX?` returns.
+///
+/// Verified over USBTMC. Over raw TCP the block framing under-reads each page
+/// by 4x because the length field counts samples, not bytes — see the "Known
+/// limitation" section in the README.
 pub fn capture(inst: &mut impl Scpi, channel: u8, mode: Mode) -> Result<Waveform> {
     ensure_channel_enabled(inst, channel)?;
     set_source(inst, channel)?;
-    set_mode(inst, mode)?;
     set_format(inst, Format::Word)?;
     let preamble = preamble(inst)?;
-    let raw = inst.query_raw(":WAVeform:DATA?")?;
-    if looks_like_ascii_volts(&raw) {
-        return Err(Error::Message(
-            "instrument is returning ASCii-format volts, not raw samples; \
-             `:WAVeform:FORMat WORD` did not take effect"
-                .into(),
-        ));
+    // Last, so the read cursor starts at the beginning of the record.
+    set_mode(inst, mode)?;
+
+    let mut samples = Vec::new();
+    let mut drained = false;
+    for _ in 0..MAX_PAGES {
+        let raw = inst.query_raw(":WAVeform:DATA?")?;
+        if looks_like_ascii_volts(&raw) {
+            return Err(Error::Message(
+                "instrument is returning ASCii-format volts, not raw samples; \
+                 `:WAVeform:FORMat WORD` did not take effect"
+                    .into(),
+            ));
+        }
+        let page = decode_data_block(&raw);
+        if page.is_empty() {
+            drained = true;
+            break;
+        }
+        samples.extend_from_slice(&page);
     }
-    let samples = decode_data_block(&raw);
+
+    // Returning a partial record silently is the bug this paging loop exists
+    // to fix, so refuse rather than hand back a truncated trace.
+    if !drained {
+        return Err(Error::Message(format!(
+            "instrument was still returning data after {MAX_PAGES} reads \
+             ({} samples); refusing to report a truncated capture",
+            samples.len()
+        )));
+    }
+
     if samples.is_empty() {
         return Err(Error::Message(format!(
             "instrument returned no samples for channel {channel}; \
