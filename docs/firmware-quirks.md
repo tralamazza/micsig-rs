@@ -9,6 +9,13 @@ Verified against an MHO14-200N, first on firmware 1.97.70 and re-checked
 end-to-end on 1.143.72 (that version string is itself unreliable — see the
 `*IDN?` entry below). Entries are marked where the two firmwares differ.
 
+Worth knowing before reading the rest: **the guide does not claim to cover this
+model.** Its applicability line lists the MHO1, MHO3 and MHO6 series along with
+MO3, MDO, ETO, STO, SATO, TO and ATO — no MHO14. That is a fair part of the
+explanation for how long this list is. An earlier edition of the guide (May
+2024, versus February 2026 for the vendored copy) is narrower still and
+predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
+
 - **The block length field is not always a byte count.** `:SYS:SCR?` reports
   bytes, but `:WAVeform:DATA?` reports a *sample* count and puts four ASCII hex
   characters on the wire per sample — the payload is 4x longer than the header
@@ -35,6 +42,10 @@ end-to-end on 1.143.72 (that version string is itself unreliable — see the
   24 of 24). The rest of the file is a valid baseline JPEG. `screenshot`
   rewrites those two bytes, anchoring on the surrounding SOI and `00 10 "JFIF"`
   rather than on the corrupt value; otherwise no viewer opens the file.
+  This is by design across the product line rather than a fault in one unit:
+  the guide's own `:SYS:SCR?` example prints the corruption as expected output,
+  `#9000358370\FF\D8X\00\00\10JFIF\00\01\01\`, where that `X` is `0x58`. The
+  same example also calls the result PNG; it is JPEG.
 - **Back-to-back `:SYS:SCR?` returns an empty block.** Issued again before the
   previous capture finishes, the scope answers `#900000000` — on 1.143.72 the
   five captures following a successful one were all empty, so this is not
@@ -76,7 +87,9 @@ end-to-end on 1.143.72 (that version string is itself unreliable — see the
   `:WAVeform:DATA?` returned an empty block in every mode. Configuring a bus
   still switches `:TRIGger:TYPE` to the bus trigger (`S1:UART Start Bit`),
   which has to be set back to `EDGE` by hand.
-- **Undocumented but working: `:WAVeform:DATA:HEX?`, `:BIN?` and `:ASCii?`.**
+- **`:WAVeform:DATA:HEX?`, `:BIN?` and `:ASCii?` work despite the stated
+  restriction.** The guide documents them in section 3.2.15.6 but notes they
+  are "supported only on 12-bit oscilloscopes"; all three answer on this unit.
   Each returns the whole `NORMal` record in one response — 110000 samples in
   ~0.05 s — where `:WAVeform:DATA?` needs three reads. `HEX?` is four ASCII hex
   characters per sample, `BIN?` is 4-byte little-endian signed integers, and

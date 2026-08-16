@@ -231,6 +231,11 @@ byte-identical to Micsig's published file, SHA-256 `f84fe826…76d8315` — and 
 excluded from the packaged crate. The vendored copy is kept because the
 upstream URL is content-addressed under a dated path and is likely to move.
 
+This is the February 2026 edition. An earlier one circulates dated May 2024;
+it is a strict subset, predating the `:SYS:SCR?`, `:WAVeform:DATA:<type>?`,
+`:MENU:RESet` and `:MENU:AUX:TRIGger` sections, so there is no reason to
+prefer it. Neither edition lists the MHO14 among its applicable models.
+
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
