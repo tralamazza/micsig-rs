@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
+use micsig_rs::acquire;
 use micsig_rs::benchmark;
+use micsig_rs::bus;
 use micsig_rs::decode;
 use micsig_rs::discover;
 use micsig_rs::measure;
@@ -115,6 +117,14 @@ enum Command {
     Measure(MeasureArgs),
     /// Read decoded serial bus frames as CSV.
     Decode(DecodeArgs),
+    /// Start continuous acquisition.
+    Run,
+    /// Halt acquisition, freezing the current record.
+    Stop,
+    /// Arm for a single acquisition, then stop.
+    Single,
+    /// Report the acquisition state.
+    Status,
 }
 
 #[derive(Args)]
@@ -204,9 +214,62 @@ struct DecodeArgs {
     #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
     bus: u8,
 
+    /// Protocol to decode. Configures the bus before reading it.
+    #[arg(short = 'T', long, value_enum)]
+    r#type: Option<bus::BusType>,
+
+    /// Input channel: UART RX, SPI clock, IIC SCL, or the source for the rest.
+    #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=4))]
+    source: Option<u8>,
+
+    /// Second input channel: SPI DATA or IIC SDA.
+    #[arg(short = 'D', long, value_parser = clap::value_parser!(u8).range(1..=4))]
+    data: Option<u8>,
+
+    /// Bit rate, for UART, LIN, CAN and ARINC 429.
+    #[arg(long)]
+    baud: Option<u32>,
+
+    /// Word width in bits, for UART and SPI.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(4..=32))]
+    width: Option<u8>,
+
+    /// Parity, UART only.
+    #[arg(long, value_enum)]
+    parity: Option<bus::Parity>,
+
+    /// Idle line level.
+    #[arg(long, value_enum)]
+    idle: Option<bus::Idle>,
+
+    /// Decode readout mode: `grap` timestamps frames, `txt` reaches further back.
+    #[arg(short = 'M', long, value_enum)]
+    mode: Option<bus::Mode>,
+
+    /// Show the bus on the instrument's screen.
+    #[arg(long)]
+    display: bool,
+
     /// Output CSV filename, or `-` for stdout (the default).
     #[arg(short, long)]
     file: Option<String>,
+}
+
+impl DecodeArgs {
+    fn config(&self) -> bus::Config {
+        bus::Config {
+            bus_type: self.r#type,
+            source: self.source,
+            data: self.data,
+            baud: self.baud,
+            width: self.width,
+            parity: self.parity,
+            idle: self.idle,
+            mode: self.mode,
+            // Only ever turned on: leaving it off is the instrument's business.
+            display: self.display.then_some(true),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -555,9 +618,27 @@ fn measure_command(conn: &ConnectionArgs, args: MeasureArgs) -> Result<()> {
     Ok(())
 }
 
+fn acquire_command(conn: &ConnectionArgs, action: Option<acquire::Action>) -> Result<()> {
+    let mut inst = conn.open(5)?;
+    let state = match action {
+        Some(a) => acquire::set(&mut inst, a)?,
+        None => acquire::status(&mut inst)?,
+    };
+    outln!("{state}");
+    Ok(())
+}
+
 fn decode_command(conn: &ConnectionArgs, args: DecodeArgs) -> Result<()> {
     let mut inst = conn.open(10)?;
-    let raw = decode::read(&mut inst, args.bus)?;
+    let config = args.config();
+    let raw = if config.is_empty() {
+        decode::read(&mut inst, args.bus)?
+    } else {
+        bus::apply(&mut inst, args.bus, &config)?;
+        // A freshly pointed decoder takes about half a second to produce
+        // anything, so poll rather than guess at a delay.
+        decode::read_settled(&mut inst, args.bus, 12, Duration::from_millis(250))?
+    };
     let csv = decode::to_csv(&raw);
     if decode::frame_count(&raw) == 0 {
         return Err(Error::Message(format!(
@@ -604,6 +685,10 @@ fn main() {
         Command::Discover(args) => discover_command(&conn, args),
         Command::Measure(args) => measure_command(&conn, args),
         Command::Decode(args) => decode_command(&conn, args),
+        Command::Run => acquire_command(&conn, Some(acquire::Action::Run)),
+        Command::Stop => acquire_command(&conn, Some(acquire::Action::Stop)),
+        Command::Single => acquire_command(&conn, Some(acquire::Action::Single)),
+        Command::Status => acquire_command(&conn, None),
     };
     if let Err(e) = result {
         // `micsig waveform | head` closes stdout early. Rust ignores SIGPIPE,

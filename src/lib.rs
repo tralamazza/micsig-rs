@@ -1,6 +1,8 @@
 //! Command-line tool to interface with a Micsig oscilloscope over SCPI.
 
+pub mod acquire;
 pub mod benchmark;
+pub mod bus;
 pub mod decode;
 pub mod discover;
 pub mod error;

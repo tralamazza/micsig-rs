@@ -103,6 +103,15 @@ predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
   `RISetime` and its short form `RIS` work. `FALL` works as written, so the
   two are not even consistent with each other. `ACRMS` is documented but only
   ever answered `--`, and `+RATE`/`-RATE` are rejected outright.
+- **`:BUS<n>:TYPE?` does not echo what you set.** `UART` reads back as `Uart`
+  and `IIC` as `I2C`, so a readback cannot be compared against the keyword
+  used to write it. The other five types echo verbatim.
+- **A reconfigured bus needs about half a second before it decodes anything.**
+  `:BUS<n>:DATA?` returns only the header row until the decoder catches up —
+  ~0.49 s measured when switching a bus cold, against ~0.05 s when it was
+  already decoding the same signal. `decode` polls rather than waiting a fixed
+  interval, because a 500 ms wait sat right on that boundary and failed
+  intermittently.
 - **`:WAVeform:STARt`/`:STOP` are accepted but ignored.** Both take a value and
   read it back, but `:WAVeform:DATA?` pages the whole record regardless. The
   automatic paging above is the only way to read past the transfer cap.

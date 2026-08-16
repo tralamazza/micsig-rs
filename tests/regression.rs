@@ -428,3 +428,157 @@ fn measure_batches_around_the_open_item_limit() {
     assert!(scope.max_seen <= 10, "opened {} at once", scope.max_seen);
     assert!(scope.open.is_empty(), "items left open on the instrument");
 }
+
+/// Records what was sent, so bus configuration can be checked without an
+/// instrument. `:BUS<n>:TYPE?` reports whatever `TYPE` was last set to, using
+/// the instrument's own spelling rather than the keyword it was given.
+struct BusScope {
+    sent: Vec<String>,
+    bus_type: String,
+}
+
+impl Scpi for BusScope {
+    fn send(&mut self, command: &str) -> Result<(), micsig_rs::error::Error> {
+        if let Some(t) = command.strip_prefix(":BUS1:TYPE ") {
+            // As the firmware does: UART comes back as Uart, IIC as I2C.
+            self.bus_type = match t {
+                "UART" => "Uart",
+                "IIC" => "I2C",
+                other => other,
+            }
+            .to_string();
+        }
+        self.sent.push(command.to_string());
+        Ok(())
+    }
+    fn query(&mut self, _: &str) -> Result<String, micsig_rs::error::Error> {
+        Ok(self.bus_type.clone())
+    }
+    fn query_raw(&mut self, _: &str) -> Result<Vec<u8>, micsig_rs::error::Error> {
+        unreachable!("bus config only uses send/query")
+    }
+}
+
+/// Each protocol names the same setting differently — the source channel is
+/// `UART:RX` but `IIC:SCL`, and ARINC 429 calls its bit rate `BANDrate`.
+/// Sending the wrong keyword gets the command rejected by the instrument.
+#[test]
+fn bus_config_maps_generic_options_onto_per_type_keywords() {
+    use micsig_rs::bus::{self, BusType, Config};
+
+    let cases = [
+        (
+            BusType::Uart,
+            ":BUS1:UART:RX CH1",
+            ":BUS1:UART:USERbaud 2000",
+        ),
+        (
+            BusType::Lin,
+            ":BUS1:LIN:CHANnel CH1",
+            ":BUS1:LIN:USERbaud 2000",
+        ),
+        (
+            BusType::Can,
+            ":BUS1:CAN:CHANnel CH1",
+            ":BUS1:CAN:USERbaud 2000",
+        ),
+        (
+            BusType::Arinc429,
+            ":BUS1:429:SOURce CH1",
+            ":BUS1:429:BANDrate 2000",
+        ),
+    ];
+    for (bus_type, want_source, want_baud) in cases {
+        let mut scope = BusScope {
+            sent: Vec::new(),
+            bus_type: String::new(),
+        };
+        bus::apply(
+            &mut scope,
+            1,
+            &Config {
+                bus_type: Some(bus_type),
+                source: Some(1),
+                baud: Some(2000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            scope.sent.contains(&want_source.to_string()),
+            "sent {:?}",
+            scope.sent
+        );
+        assert!(
+            scope.sent.contains(&want_baud.to_string()),
+            "sent {:?}",
+            scope.sent
+        );
+    }
+}
+
+/// An option the selected protocol has no equivalent for must be an error.
+/// Dropping it silently would leave the user believing it had been applied.
+#[test]
+fn bus_config_refuses_options_the_type_lacks() {
+    use micsig_rs::bus::{self, BusType, Config, Parity};
+
+    let mut scope = BusScope {
+        sent: Vec::new(),
+        bus_type: String::new(),
+    };
+    let err = bus::apply(
+        &mut scope,
+        1,
+        &Config {
+            bus_type: Some(BusType::Can),
+            parity: Some(Parity::Odd),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("--parity"), "got: {err}");
+
+    let mut scope = BusScope {
+        sent: Vec::new(),
+        bus_type: String::new(),
+    };
+    let err = bus::apply(
+        &mut scope,
+        1,
+        &Config {
+            bus_type: Some(BusType::Iic),
+            baud: Some(400000),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("--baud"), "got: {err}");
+}
+
+/// With no --type, the protocol already selected on the instrument is used,
+/// so `--baud` alone works on an already-configured bus. That means parsing
+/// the reply, which is not the keyword the type was set with.
+#[test]
+fn bus_config_without_type_uses_the_instrument_s_own_spelling() {
+    use micsig_rs::bus::{self, Config};
+
+    let mut scope = BusScope {
+        sent: Vec::new(),
+        bus_type: "I2C".to_string(),
+    };
+    bus::apply(
+        &mut scope,
+        1,
+        &Config {
+            source: Some(3),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        scope.sent.contains(&":BUS1:IIC:SCL CH3".to_string()),
+        "I2C readback not mapped back to the IIC keyword: {:?}",
+        scope.sent
+    );
+}

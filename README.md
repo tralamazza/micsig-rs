@@ -83,6 +83,13 @@ micsig scpi -x ":WAVeform:PREamble?"
 micsig scpi -i
 ```
 
+Piping into `-i` runs a script over a single connection, which is much quicker
+than one `micsig scpi` per line since each of those opens its own:
+
+```
+printf ':BUS1:TYPE UART\n:BUS1:UART:RX CH1\n:BUS1:DISPlay 1\n' | micsig scpi -i
+```
+
 ### `screenshot` — capture the screen
 
 ```
@@ -123,6 +130,22 @@ running too. What `raw` does change is the length: with the scope stopped at
 1 ms/div (`:ACQuire:DEPTh?` = 11 M) it yielded all 11,000,000 samples in 14 s
 and a 409 MB CSV, against 110,000 in 0.13 s for `normal`. Ask for `raw`
 deliberately — it is the file size rather than the wait that will surprise you.
+
+### `run`, `stop`, `single`, `status` — acquisition control
+
+```
+micsig run | stop | single | status
+```
+
+Each prints the resulting state from `:TRIGger:STATus?`. `single` reports `RUN`
+until the trigger fires, since an armed instrument is still running.
+
+`waveform --mode raw` wants a stopped scope, which is what these are mainly
+for:
+
+```
+micsig stop && micsig waveform -m raw -f trace.csv && micsig run
+```
 
 ### `benchmark` — measure request latency
 
@@ -182,22 +205,37 @@ A reading is not a single query: each item has to be added with
 holds at most ten open at once. `measure` handles all of that in batches of
 ten and closes what it opened, so the scope is left as it was found.
 
-### `decode` — read decoded serial bus frames
+### `decode` — configure and read a serial bus
 
 ```
-micsig decode [--bus <1|2>] [--file <name>]
+micsig decode [--bus <1|2>] [--type <protocol>] [--source <1-4>] [--data <1-4>]
+              [--baud <n>] [--width <n>] [--parity <none|odd|even>]
+              [--idle <high|low>] [--mode <grap|txt>] [--display] [--file <name>]
 ```
 
-Reads the scope's serial bus decoder (UART, LIN, SPI, CAN, IIC, 1553B, 429)
-and emits CSV. The bus must already be configured on the instrument:
+Configures the decoder and reads it back as CSV, for UART, LIN, SPI, CAN, IIC,
+1553B and ARINC 429. With no configuration options it reads whatever the bus is
+already set to:
 
 ```
-micsig scpi ":BUS1:TYPE UART"
-micsig scpi ":BUS1:UART:RX CH1"
-micsig scpi ":BUS1:UART:USERbaud 2000"
-micsig scpi ":BUS1:DISPlay 1"
-micsig decode
+micsig decode --type uart --source 1 --baud 2000 --width 8 --parity none --display
 ```
+
+The option names are generic and map onto whatever each protocol calls the
+setting — `--source` is `UART:RX` but `IIC:SCL` and `SPI:CLK`, `--baud` is
+`USERbaud` except on ARINC 429 where it is `BANDrate`. An option the selected
+protocol has no equivalent for is an error rather than being quietly dropped:
+
+```
+$ micsig decode --type can --source 1 --parity odd
+error: --parity does not apply to bus type CAN: only UART has a parity bit
+```
+
+Only the UART path has been verified end to end against real traffic. The other
+six are confirmed to accept their settings and read them back, but were never
+given a signal to decode. SPI and IIC take `--source` for clock and `--data`
+for the data line; anything beyond that — SPI chip select, CAN FD rates — still
+needs raw `scpi`.
 
 ```
 BeginX,EndX,Data,Color

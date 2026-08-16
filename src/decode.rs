@@ -55,6 +55,34 @@ pub fn frame_count(raw: &str) -> usize {
     to_csv(raw).lines().skip(1).count()
 }
 
+/// Read a bus, waiting for the decoder to catch up.
+///
+/// After the bus is reconfigured the instrument needs a moment before
+/// `:BUS<n>:DATA?` has anything in it — measured at ~0.49 s on an MHO14-200N
+/// (firmware 1.143.72) when switching a bus cold, against ~0.05 s when it was
+/// already decoding the same signal. A fixed wait sat right on that boundary
+/// and failed intermittently, so poll instead and stop as soon as frames
+/// appear. The last response is returned either way, so an empty bus is still
+/// reported by the caller rather than swallowed here.
+pub fn read_settled(
+    inst: &mut impl Scpi,
+    bus: u8,
+    attempts: usize,
+    delay: std::time::Duration,
+) -> Result<String> {
+    let mut last = String::new();
+    for attempt in 0..attempts.max(1) {
+        if attempt > 0 && !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        last = read(inst, bus)?;
+        if frame_count(&last) > 0 {
+            break;
+        }
+    }
+    Ok(last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
