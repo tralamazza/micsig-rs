@@ -285,15 +285,21 @@ pub fn decode_word_samples(raw: &[u8]) -> Vec<i16> {
         .collect()
 }
 
-/// Convert raw samples to volts using the preamble scaling:
+/// Convert one raw sample to volts using the preamble scaling:
 /// `v = (sample - y_reference) * y_increment + y_origin`.
+pub fn sample_to_volts(preamble: &Preamble, sample: i16) -> f64 {
+    (sample as f64 - preamble.y_reference as f64) * preamble.y_increment + preamble.y_origin
+}
+
+/// Convert a whole trace to volts.
+///
+/// Prefer [`sample_to_volts`] in a loop when the result is consumed once. A
+/// full-depth capture is 11 million samples, so the `Vec<f64>` this returns is
+/// 88 MB — on its own more than twice the rest of the program's footprint.
 pub fn samples_to_volts(wave: &Waveform) -> Vec<f64> {
     wave.samples
         .iter()
-        .map(|&s| {
-            (s as f64 - wave.preamble.y_reference as f64) * wave.preamble.y_increment
-                + wave.preamble.y_origin
-        })
+        .map(|&s| sample_to_volts(&wave.preamble, s))
         .collect()
 }
 

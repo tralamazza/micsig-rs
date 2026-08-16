@@ -397,16 +397,15 @@ fn screenshot_command(conn: &ConnectionArgs, args: ScreenshotArgs) -> Result<()>
 fn waveform_command(conn: &ConnectionArgs, args: WaveformArgs) -> Result<()> {
     let mut inst = conn.open(10)?;
     let wave = waveform::capture(&mut inst, args.channel, args.mode.into())?;
-    let volts = waveform::samples_to_volts(&wave);
     match args.file.as_deref() {
         Some("-") | None => {
             let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-            write_waveform_csv(&mut out, &wave, &volts).map_err(Error::Io)?;
+            write_waveform_csv(&mut out, &wave).map_err(Error::Io)?;
         }
         Some(path) => {
             let f = std::fs::File::create(path).map_err(Error::Io)?;
             let mut out = std::io::BufWriter::new(f);
-            write_waveform_csv(&mut out, &wave, &volts).map_err(Error::Io)?;
+            write_waveform_csv(&mut out, &wave).map_err(Error::Io)?;
             outln!("Saved waveform data to {path}");
         }
     }
@@ -415,18 +414,20 @@ fn waveform_command(conn: &ConnectionArgs, args: WaveformArgs) -> Result<()> {
 
 /// Write the trace as CSV.
 ///
-/// The caller must hand this a buffered writer. A full-depth `--mode raw`
-/// capture is 11 million rows, and one `writeln!` per row straight at a
-/// `File` or a line-buffered stdout is one write syscall per row — that alone
-/// dominated the runtime of every export.
+/// Two things about a full-depth `--mode raw` capture, which is 11 million
+/// rows, shape this. The caller must hand over a buffered writer, because one
+/// `writeln!` per row straight at a `File` or a line-buffered stdout is one
+/// write syscall per row, and that dominated the runtime of every export. And
+/// volts are scaled a row at a time rather than up front: collecting them
+/// first costs an 88 MB `Vec<f64>` that is read once and dropped.
 fn write_waveform_csv(
     out: &mut impl std::io::Write,
     wave: &waveform::Waveform,
-    volts: &[f64],
 ) -> std::io::Result<()> {
     writeln!(out, "sample,time_s,voltage_v")?;
-    for (i, v) in volts.iter().enumerate() {
+    for (i, &sample) in wave.samples.iter().enumerate() {
         let t = wave.preamble.x_origin + i as f64 * wave.preamble.x_increment;
+        let v = waveform::sample_to_volts(&wave.preamble, sample);
         writeln!(out, "{i},{t:.9e},{v:.9e}")?;
     }
     // BufWriter swallows errors on drop, so surface them here instead.
