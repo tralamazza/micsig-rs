@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Linux is the only target where libusb is expected from the system.
       # Without these, libusb1-sys falls back to building its vendored copy,
@@ -41,7 +41,7 @@ jobs:
     name: rustfmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install libusb
         run: |
           sudo apt-get update
@@ -57,7 +57,7 @@ jobs:
     name: msrv (1.88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install libusb
         run: |
           sudo apt-get update
