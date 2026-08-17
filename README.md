@@ -114,22 +114,63 @@ a zero-byte file.
 micsig waveform [--channel <1-4>] [--mode <normal|maximum|raw>] [--file <name>]
 ```
 
-Sets `:WAVeform:SOURce` and `:WAVeform:FORMat`, reads `:WAVeform:PREamble?`,
-then writes `:WAVeform:MODE` and reads `:WAVeform:DATA?` repeatedly until the
-instrument returns an empty block. Samples (binary or ASCII-hex, auto-detected)
-are scaled to volts from the preamble and emitted as CSV
+Sets `:WAVeform:SOURce`, `:WAVeform:FORMat` and `:WAVeform:MODE`, reads
+`:WAVeform:DATA?` repeatedly until the instrument returns an empty block, and
+finishes with `:WAVeform:PREamble?`. Samples (binary or ASCII-hex,
+auto-detected) are scaled to volts from the preamble and emitted as CSV
 (`sample,time_s,voltage_v`) to stdout, or to `--file`.
 
-The repeated read matters: each response is capped at 62500 samples, and the
-next call continues from where the last stopped. A single read therefore
-returns only part of the record — 62500 of 110000 in `normal` mode. Writing
-`:WAVeform:MODE` rewinds that cursor, which is why it is sent last.
+Two details of that order are load-bearing. The repeated read matters because
+each response is capped at 62500 samples and the next call continues from where
+the last stopped, so a single read returns only part of the record — 62500 of
+110000 in `normal` mode; writing `:WAVeform:MODE` rewinds that cursor, which is
+why it is sent last of the three. And the preamble comes *after* the data
+because it describes the previous read: fetch it first and a capture taken
+right after a scale change is scaled by the old setting, silently, with every
+value looking reasonable.
 
 The manual says `--mode raw` requires a stopped scope; it returned data while
 running too. What `raw` does change is the length: with the scope stopped at
 1 ms/div (`:ACQuire:DEPTh?` = 11 M) it yielded all 11,000,000 samples in 14 s
 and a 409 MB CSV, against 110,000 in 0.13 s for `normal`. Ask for `raw`
 deliberately — it is the file size rather than the wait that will surprise you.
+
+### `segmented` — capture a burst of triggers, one CSV per frame
+
+```
+micsig segmented [--count <n>] [--frames <spec>] [--channel <1-4>]
+                 [--out-dir <dir>] [--prefix <name>] [--mode <normal|maximum|raw>]
+                 [--wait <t>] [--settle <t>] [--no-export]
+```
+
+Segmented acquisition spends the acquisition memory on many short records
+instead of one long one, so a train of infrequent events is caught without the
+dead time between them. `--count` arms that many segments, waits for them to
+fill, then exports each as its own CSV:
+
+```
+micsig segmented -n 16 -d ./burst      # burst/segment_01.csv ... segment_16.csv
+micsig segmented --frames 1,4,7-9      # re-export from the frames still in memory
+```
+
+Without `--count`, nothing is captured: the frames already held on the
+instrument are exported, so a burst can be sliced up more than once without
+re-running it. `--frames` takes a comma-separated list of numbers and inclusive
+ranges. Files are `<prefix>_<frame>.csv`, zero-padded so they sort in capture
+order, and each is the same `sample,time_s,voltage_v` CSV `waveform` writes.
+
+The command finishes with the instrument stopped and segmented mode still on,
+which is what makes re-exporting and scrolling through the burst on the front
+panel possible; `micsig scpi ":ACQuire:SEGMented OFF"` and `micsig run` put it
+back. Fewer segments than asked for is a warning rather than an error — the
+ones that did arrive are still exported. `--no-export` captures and stops
+there, leaving the burst on the instrument to look at or pull off later.
+
+`--settle` is the pause between selecting a frame and reading it. The default
+of 300 ms is deliberately generous: the readout follows `:FRA1` after about
+50 ms, and reading too early returns the previously selected frame with nothing
+to indicate it. Lower it if you are exporting hundreds of frames and have
+checked the result.
 
 ### `run`, `stop`, `single`, `status` — acquisition control
 

@@ -267,15 +267,86 @@ fn waveform_capture_sets_mode_after_the_other_setup() {
         .iter()
         .position(|c| c == ":WAVeform:DATA?")
         .unwrap();
-    for other in [
-        ":WAVeform:SOURce",
-        ":WAVeform:FORMat",
-        ":WAVeform:PREamble?",
-    ] {
+    for other in [":WAVeform:SOURce", ":WAVeform:FORMat"] {
         let at = scope.log.iter().position(|c| c.starts_with(other)).unwrap();
         assert!(at < mode, "{other} must be sent before :WAVeform:MODE");
     }
     assert!(mode < first_read);
+    // The preamble describes the read that has just happened, so it comes last.
+    let preamble = scope
+        .log
+        .iter()
+        .position(|c| c == ":WAVeform:PREamble?")
+        .unwrap();
+    let last_read = scope
+        .log
+        .iter()
+        .rposition(|c| c == ":WAVeform:DATA?")
+        .unwrap();
+    assert!(
+        preamble > last_read,
+        "the preamble must be read after the data"
+    );
+}
+
+/// An instrument whose preamble describes the *previous* `:WAVeform:DATA?`
+/// read rather than the pending one, as an MHO14-200N (firmware 1.143.72)
+/// does. Measured by switching CH1 from 1 V/div to 0.2 V/div: the preamble
+/// kept reporting the old `y_increment` for as long as it was asked — five
+/// seconds and more — and only caught up once a capture had been read.
+struct LaggingPreamble {
+    /// Reported until the first data read, describing the settings that were
+    /// in force before the vertical scale was changed.
+    stale: &'static str,
+    /// Reported afterwards, describing the samples actually returned.
+    fresh: &'static str,
+    read: bool,
+}
+
+impl Scpi for LaggingPreamble {
+    fn send(&mut self, _command: &str) -> Result<(), micsig_rs::error::Error> {
+        Ok(())
+    }
+
+    fn query(&mut self, command: &str) -> Result<String, micsig_rs::error::Error> {
+        Ok(match command {
+            c if c.starts_with(":CHANnel") => "1".to_string(),
+            ":WAVeform:PREamble?" if self.read => self.fresh.to_string(),
+            ":WAVeform:PREamble?" => self.stale.to_string(),
+            _ => "0".to_string(),
+        })
+    }
+
+    fn query_raw(&mut self, _command: &str) -> Result<Vec<u8>, micsig_rs::error::Error> {
+        if self.read {
+            return Ok(b"#9000000000\n".to_vec());
+        }
+        self.read = true;
+        Ok(hex_block(4))
+    }
+}
+
+/// Scaling a capture with a preamble read beforehand reports volts that are
+/// wrong by the ratio of the old scale to the new one — 84.7 mV against a true
+/// 17.3 mV on the hardware this models. The samples are right; only the
+/// scaling is stale, which is what makes it easy to miss.
+#[test]
+fn waveform_capture_scales_with_the_preamble_that_describes_it() {
+    let mut scope = LaggingPreamble {
+        // y_increment 5x too large, as a 1 V/div preamble is for 0.2 V/div data.
+        stale: "0,0,1,1.0E-9,0.0,0.0,5.0E-3,0.0,0.0",
+        fresh: "0,0,1,1.0E-9,0.0,0.0,1.0E-3,0.0,0.0",
+        read: false,
+    };
+    let wave = micsig_rs::waveform::capture(&mut scope, 1, micsig_rs::waveform::Mode::Normal)
+        .expect("capture should succeed");
+    assert_eq!(wave.preamble.y_increment, 1.0E-3);
+    // Sample 3 of hex_block(4) is 0x0003, and y_reference and y_origin are 0.
+    let volts = micsig_rs::waveform::sample_to_volts(&wave.preamble, wave.samples[3]);
+    assert!(
+        (volts - 3.0E-3).abs() < 1e-12,
+        "scaled with the stale preamble: {volts}"
+    );
 }
 
 /// A record that never terminates must be reported, not quietly truncated.
@@ -580,5 +651,151 @@ fn bus_config_without_type_uses_the_instrument_s_own_spelling() {
         scope.sent.contains(&":BUS1:IIC:SCL CH3".to_string()),
         "I2C readback not mapped back to the IIC keyword: {:?}",
         scope.sent
+    );
+}
+
+/// A segmented instrument whose `:NO?` behaves the way an MHO14-200N does:
+/// it keeps reporting the previous burst's total for a moment after
+/// `:MENU:SINGLE`, then counts the new one up from zero.
+struct SegmentScope {
+    /// The finished burst's total, reported during the carry-over window.
+    stale: u32,
+    /// Segments the new burst will reach.
+    fills_to: u32,
+    /// How long the old total keeps being reported.
+    carry_over: std::time::Duration,
+    /// One segment per this interval once the burst is really running.
+    per_segment: std::time::Duration,
+    /// Whether reaching `fills_to` ends the acquisition. False models an
+    /// instrument still armed and waiting for triggers that never come.
+    stops_when_full: bool,
+    armed: Option<std::time::Instant>,
+    sent: Vec<String>,
+}
+
+impl SegmentScope {
+    fn new(stale: u32, fills_to: u32) -> Self {
+        SegmentScope {
+            stale,
+            fills_to,
+            carry_over: std::time::Duration::from_millis(200),
+            per_segment: std::time::Duration::ZERO,
+            stops_when_full: true,
+            armed: None,
+            sent: Vec::new(),
+        }
+    }
+
+    fn count(&self) -> u32 {
+        let Some(armed) = self.armed else {
+            return self.stale;
+        };
+        let elapsed = armed.elapsed();
+        if elapsed < self.carry_over {
+            return self.stale;
+        }
+        if self.per_segment.is_zero() {
+            return self.fills_to;
+        }
+        let since = elapsed - self.carry_over;
+        (since.as_nanos() / self.per_segment.as_nanos()).min(self.fills_to as u128) as u32
+    }
+}
+
+impl Scpi for SegmentScope {
+    fn send(&mut self, command: &str) -> Result<(), micsig_rs::error::Error> {
+        self.sent.push(command.to_string());
+        if command == ":MENU:SINGLE" {
+            self.armed = Some(std::time::Instant::now());
+        }
+        Ok(())
+    }
+
+    fn query(&mut self, command: &str) -> Result<String, micsig_rs::error::Error> {
+        self.sent.push(command.to_string());
+        Ok(match command {
+            ":ACQuire:SEGMented:NO?" => self.count().to_string(),
+            ":ACQuire:SEGMented?" => "1".to_string(),
+            // Still armed: the instrument reports WAIT while it fills.
+            ":TRIGger:STATus?" if self.stops_when_full && self.count() >= self.fills_to => {
+                "STOP".to_string()
+            }
+            ":TRIGger:STATus?" => "WAIT".to_string(),
+            _ => "0".to_string(),
+        })
+    }
+
+    fn query_raw(&mut self, _command: &str) -> Result<Vec<u8>, micsig_rs::error::Error> {
+        Ok(Vec::new())
+    }
+}
+
+/// `:ACQuire:SEGMented:NO?` answers with the previous burst's total for a
+/// moment after arming. Believe it and a capture that asked for fewer segments
+/// than the last one "finishes" before a single new segment has been stored —
+/// and the frames exported afterwards are the old burst's.
+#[test]
+fn segmented_arm_ignores_the_previous_burst_s_count() {
+    let mut scope = SegmentScope::new(9, 4);
+    let result = micsig_rs::segment::arm(
+        &mut scope,
+        4,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(10),
+        |_, _| {},
+    )
+    .expect("arm should succeed");
+
+    assert_eq!(result.captured, 4);
+    assert_eq!(result.outcome, micsig_rs::segment::Outcome::Full);
+    assert!(!result.is_partial());
+    // The burst has to be started, and stopped again so the frames can be read.
+    assert!(scope.sent.contains(&":MENU:SINGLE".to_string()));
+    assert!(scope.sent.contains(&":MENU:STOP".to_string()));
+}
+
+/// A burst that stops arriving must be reported rather than waited out: the
+/// segments already captured are still worth exporting.
+#[test]
+fn segmented_arm_gives_up_on_a_burst_that_stops_arriving() {
+    let mut scope = SegmentScope {
+        // Three segments arrive and then the triggers dry up, with the
+        // instrument still armed for the remaining thirteen.
+        stops_when_full: false,
+        ..SegmentScope::new(0, 3)
+    };
+    let started = std::time::Instant::now();
+    let result = micsig_rs::segment::arm(
+        &mut scope,
+        16,
+        // A deadline far longer than the stall window, so that reaching it
+        // would mean the stall check never fired.
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(300),
+        std::time::Duration::from_millis(10),
+        |_, _| {},
+    )
+    .expect("arm should succeed");
+
+    assert_eq!(result.captured, 3);
+    assert_eq!(result.requested, 16);
+    assert!(result.is_partial());
+    assert_eq!(result.outcome, micsig_rs::segment::Outcome::Stalled);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// Selecting a frame has to say which display mode it means, and `:FRA1` only
+/// applies to the single-frame one.
+#[test]
+fn segment_selection_sets_the_single_frame_display_first() {
+    let mut scope = SegmentScope::new(0, 1);
+    micsig_rs::segment::select_settled(&mut scope, 7, std::time::Duration::ZERO).unwrap();
+    assert_eq!(
+        scope.sent,
+        vec![
+            ":ACQuire:SEGMented:DISType SINGLe".to_string(),
+            ":ACQuire:SEGMented:FRA1 7".to_string(),
+        ]
     );
 }

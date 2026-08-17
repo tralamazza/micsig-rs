@@ -61,6 +61,18 @@ predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
   Query it out of that order and the scaling describes the previously selected
   channel. `capture` sets the source first, so its volts are correct — measured
   within 1% of the instrument's own pk-pk reading at 0.49, 1.0 and 2.0 V/div.
+- **The preamble describes the *previous* `:WAVeform:DATA?` read.** It is not a
+  question of settling: after switching CH1 from 1 V/div to 0.2 V/div the
+  preamble kept reporting the old `y_increment` for as long as it was asked —
+  five seconds and twenty queries — and only caught up once a capture had been
+  read. Scale a trace with a preamble fetched beforehand and the volts are
+  wrong by the ratio between the two settings: 84.7 mV for a sample that was
+  17.3 mV once the preamble was current, a 5x error for a 5x scale change. The
+  time axis goes the same way. It is silent, and every value looks plausible,
+  which is what makes it worth stating twice. `capture` reads the preamble
+  after the data for this reason, and the result now tracks the instrument's
+  own pk-pk within 1% across a scale change rather than only when nothing has
+  moved.
 - **`:WAVeform:FORMat ASCii` returns volts, not samples** — comma-separated
   scientific notation (`1.148325e-02,...`), already scaled. It does not fit the
   sample-plus-preamble model, so only `WORD` and `BYTE` are offered.
@@ -115,6 +127,34 @@ predates the `:SYS:SCR?` and `:WAVeform:DATA:<type>?` sections entirely.
 - **`:WAVeform:STARt`/`:STOP` are accepted but ignored.** Both take a value and
   read it back, but `:WAVeform:DATA?` pages the whole record regardless. The
   automatic paging above is the only way to read past the transfer cap.
+- **A newly selected segment takes about 50 ms to reach the readout.**
+  `:ACQuire:SEGMented:FRA1 <n>` answers its own query immediately, but
+  `:WAVeform:DATA?` keeps serving the previously selected frame for a moment
+  after it. Selecting five frames of a filled capture in turn and comparing
+  digests: with no wait every single read returned the frame selected before
+  it, at 25 ms two of five were still stale, and from 50 ms up every frame was
+  correct. `segmented` waits 300 ms, six times the measured boundary, because
+  the failure is a plausible-looking trace from the wrong segment.
+- **`:ACQuire:SEGMented:NO?` reports the last burst's total, then bounces.**
+  Read at 40 ms intervals starting the moment `:MENU:SINGLE` was sent, with 7
+  segments armed over a capture that had stored 6, it answered `6, 0, 7, 0, 7,
+  7, 7`. A capture that asks for fewer segments than the previous one appears
+  to be complete before it has begun. `:TRIGger:STATus?` is stale over the same
+  window. `segment::arm` ignores everything for 400 ms after arming and only
+  ever counts upward afterwards.
+- **`:MENU:RUN` does not restart a segmented burst.** On a stopped instrument
+  holding a finished capture it returns to the running state and leaves
+  `:ACQuire:SEGMented:NO?` exactly where it was, for as long as it was watched.
+  `:MENU:SINGLE` is what arms a new one, and it works from either state.
+- **`:ACQuire:SEGMented:QTY` validates nothing.** 100, 1000, 10000 and 100000
+  were all accepted and echoed back unchanged. The guide says only "refer to
+  the data manual" for the limit, so treat the readback as a record of what was
+  asked for rather than what the hardware will do.
+- **Trigger settings written over SCPI did not gate acquisition.** With
+  `:TRIGger:MODE NORMal`, `:TRIGger:EDGE:SOURce CH1` and the level at 50 V
+  against a 2 V pk-pk signal — all confirmed by readback — `:MENU:SINGLE` still
+  completed immediately, segmented or not. Whatever the mechanism, do not
+  expect to hold off a capture by setting an unreachable trigger level.
 - **The display lags SCPI writes by roughly 0.15–0.5 s**, and longer after a
   write that re-arms acquisition (a timebase change). A screenshot taken
   immediately after a settings write can show the previous state.

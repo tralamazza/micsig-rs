@@ -9,6 +9,7 @@ pub mod error;
 pub mod measure;
 pub mod scpi;
 pub mod screenshot;
+pub mod segment;
 pub mod transport;
 pub mod usb;
 pub mod waveform;

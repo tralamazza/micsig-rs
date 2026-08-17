@@ -11,6 +11,7 @@ use micsig_rs::decode;
 use micsig_rs::discover;
 use micsig_rs::measure;
 use micsig_rs::screenshot;
+use micsig_rs::segment;
 use micsig_rs::transport::{DEFAULT_RAW_PORT, Instrument, Scpi};
 use micsig_rs::usb::UsbInstrument;
 use micsig_rs::waveform;
@@ -117,6 +118,8 @@ enum Command {
     Measure(MeasureArgs),
     /// Read decoded serial bus frames as CSV.
     Decode(DecodeArgs),
+    /// Capture a burst of triggers as segments and export each one.
+    Segmented(SegmentedArgs),
     /// Start continuous acquisition.
     Run,
     /// Halt acquisition, freezing the current record.
@@ -270,6 +273,45 @@ impl DecodeArgs {
             display: self.display.then_some(true),
         }
     }
+}
+
+#[derive(Args)]
+struct SegmentedArgs {
+    /// Channel to read.
+    #[arg(short, long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
+    channel: u8,
+
+    /// Segments to arm for. Without it, read the frames already in memory.
+    #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..))]
+    count: Option<u32>,
+
+    /// Frames to export, e.g. `1,4,7-9`. Defaults to every captured frame.
+    #[arg(long)]
+    frames: Option<segment::Frames>,
+
+    /// Directory for the exported CSV files, created if it does not exist.
+    #[arg(short = 'd', long, default_value = ".")]
+    out_dir: std::path::PathBuf,
+
+    /// Filename prefix; files are `<prefix>_<frame>.csv`.
+    #[arg(long, default_value = "segment")]
+    prefix: String,
+
+    /// Read mode, as for `waveform`.
+    #[arg(short = 'm', long, value_enum, default_value_t = ModeArg::Normal)]
+    mode: ModeArg,
+
+    /// How long to wait for the segments to fill.
+    #[arg(long, value_parser = parse_timeout, default_value = "30")]
+    wait: Duration,
+
+    /// Pause after selecting each frame, before reading it.
+    #[arg(long, value_parser = parse_timeout, default_value = "300ms")]
+    settle: Duration,
+
+    /// Capture only; leave the frames on the instrument without exporting.
+    #[arg(long, requires = "count")]
+    no_export: bool,
 }
 
 #[derive(Args)]
@@ -660,6 +702,108 @@ fn decode_command(conn: &ConnectionArgs, args: DecodeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Capture a burst of segments and write one CSV per frame.
+///
+/// The instrument is deliberately left as the capture leaves it — stopped, with
+/// segmented mode on and the frames still in memory — so the same burst can be
+/// re-exported, or scrolled through on the front panel, without capturing
+/// again. The closing hint says how to put it back.
+fn segmented_command(conn: &ConnectionArgs, args: SegmentedArgs) -> Result<()> {
+    let mut inst = conn.open(10)?;
+
+    let available = match args.count {
+        Some(count) => {
+            eprintln!("Arming {count} segments. Waiting for triggers...");
+            let result = segment::arm(
+                &mut inst,
+                count,
+                args.wait,
+                // Bursts usually finish well inside the deadline; three seconds
+                // without a new trigger is taken as the end of one.
+                Duration::from_secs(3),
+                Duration::from_millis(100),
+                |seen, of| eprint!("\r  {seen}/{of} segments"),
+            )?;
+            eprintln!();
+            if result.is_partial() {
+                let why = match result.outcome {
+                    segment::Outcome::Stopped => "the instrument stopped acquiring",
+                    segment::Outcome::Stalled => "no further trigger arrived",
+                    _ => "the wait expired",
+                };
+                eprintln!(
+                    "warning: captured {} of {} segments - {why}. Check the \
+                     trigger level and try a longer --wait.",
+                    result.captured, result.requested
+                );
+            }
+            result.captured
+        }
+        None => {
+            if !segment::enabled(&mut inst)? {
+                return Err(Error::Message(
+                    "segmented acquisition is off and no --count was given; \
+                     pass --count <n> to capture a burst"
+                        .into(),
+                ));
+            }
+            segment::captured(&mut inst)?
+        }
+    };
+
+    if available == 0 {
+        return Err(Error::Message(
+            "no segments were captured; nothing to export".into(),
+        ));
+    }
+    if args.no_export {
+        outln!("Captured {available} segment{}", plural(available as usize));
+        return Ok(());
+    }
+
+    let frames = match args.frames.map(|f| f.0) {
+        Some(frames) => {
+            if let Some(&over) = frames.iter().find(|&&f| f > available) {
+                return Err(Error::Message(format!(
+                    "frame {over} was not captured; only {available} \
+                     segment{} available",
+                    plural(available as usize)
+                )));
+            }
+            frames
+        }
+        None => (1..=available).collect(),
+    };
+
+    std::fs::create_dir_all(&args.out_dir).map_err(Error::Io)?;
+    // Zero-pad to the widest frame number so the files sort in capture order.
+    let width = frames.iter().max().copied().unwrap_or(1).to_string().len();
+    for (i, frame) in frames.iter().enumerate() {
+        segment::select_settled(&mut inst, *frame, args.settle)?;
+        let wave = waveform::capture(&mut inst, args.channel, args.mode.into())?;
+        let path = args
+            .out_dir
+            .join(format!("{}_{frame:0width$}.csv", args.prefix));
+        let f = std::fs::File::create(&path).map_err(Error::Io)?;
+        write_waveform_csv(&mut std::io::BufWriter::new(f), &wave).map_err(Error::Io)?;
+        // The frame number and the position in the selection are not the same
+        // thing once --frames is used.
+        eprint!("\r  wrote frame {frame} ({}/{})", i + 1, frames.len());
+    }
+    eprintln!();
+    outln!(
+        "Saved {} of {available} segment{} to {}",
+        frames.len(),
+        plural(available as usize),
+        args.out_dir.display()
+    );
+    outln!(
+        "The instrument is stopped in segmented mode; \
+         `micsig scpi \":ACQuire:SEGMented OFF\"` and `micsig run` restore it."
+    );
+    Ok(())
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
@@ -685,6 +829,7 @@ fn main() {
         Command::Discover(args) => discover_command(&conn, args),
         Command::Measure(args) => measure_command(&conn, args),
         Command::Decode(args) => decode_command(&conn, args),
+        Command::Segmented(args) => segmented_command(&conn, args),
         Command::Run => acquire_command(&conn, Some(acquire::Action::Run)),
         Command::Stop => acquire_command(&conn, Some(acquire::Action::Stop)),
         Command::Single => acquire_command(&conn, Some(acquire::Action::Single)),
